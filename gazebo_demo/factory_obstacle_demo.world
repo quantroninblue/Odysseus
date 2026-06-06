@@ -607,12 +607,12 @@
 
       <link name="base_link">
         <inertial>
-          <pose>-0.08 0 -0.02 0 0 0</pose>
-          <mass>32.0</mass>
+          <pose>0 0 -0.16 0 0 0</pose>
+          <mass>38.0</mass>
           <inertia>
-            <ixx>1.60</ixx>
-            <iyy>1.80</iyy>
-            <izz>1.90</izz>
+            <ixx>2.40</ixx>
+            <iyy>2.10</iyy>
+            <izz>2.80</izz>
             <ixy>0</ixy>
             <ixz>0</ixz>
             <iyz>0</iyz>
@@ -624,19 +624,39 @@
           <geometry><box><size>0.72 0.58 0.36</size></box></geometry>
         </collision>
 
-        <collision name="left_track_collision">
-          <pose>0 0.43 -0.26 0 0 0</pose>
-          <geometry><box><size>0.92 0.22 0.16</size></box></geometry>
+        <collision name="front_left_skid_collision">
+          <pose>0.36 0.30 -0.33 0 0 0</pose>
+          <geometry><box><size>0.24 0.10 0.04</size></box></geometry>
           <surface>
-            <friction><ode><mu>1.2</mu><mu2>1.2</mu2></ode></friction>
+            <friction><ode><mu>0.08</mu><mu2>0.08</mu2></ode></friction>
+            <contact><ode><kp>100000</kp><kd>10</kd></ode></contact>
           </surface>
         </collision>
 
-        <collision name="right_track_collision">
-          <pose>0 -0.43 -0.26 0 0 0</pose>
-          <geometry><box><size>0.92 0.22 0.16</size></box></geometry>
+        <collision name="front_right_skid_collision">
+          <pose>0.36 -0.30 -0.33 0 0 0</pose>
+          <geometry><box><size>0.24 0.10 0.04</size></box></geometry>
           <surface>
-            <friction><ode><mu>1.2</mu><mu2>1.2</mu2></ode></friction>
+            <friction><ode><mu>0.08</mu><mu2>0.08</mu2></ode></friction>
+            <contact><ode><kp>100000</kp><kd>10</kd></ode></contact>
+          </surface>
+        </collision>
+
+        <collision name="rear_left_skid_collision">
+          <pose>-0.36 0.30 -0.33 0 0 0</pose>
+          <geometry><box><size>0.24 0.10 0.04</size></box></geometry>
+          <surface>
+            <friction><ode><mu>0.08</mu><mu2>0.08</mu2></ode></friction>
+            <contact><ode><kp>100000</kp><kd>10</kd></ode></contact>
+          </surface>
+        </collision>
+
+        <collision name="rear_right_skid_collision">
+          <pose>-0.36 -0.30 -0.33 0 0 0</pose>
+          <geometry><box><size>0.24 0.10 0.04</size></box></geometry>
+          <surface>
+            <friction><ode><mu>0.08</mu><mu2>0.08</mu2></ode></friction>
+            <contact><ode><kp>100000</kp><kd>10</kd></ode></contact>
           </surface>
         </collision>
 
@@ -732,12 +752,15 @@
       </link>
 
       <link name="left_wheel">
-        <pose>0 0.43 -0.18 1.5708 0 0</pose>
+        <pose>0 0.43 -0.18 -1.5708 0 0</pose>
         <inertial>
           <mass>1.0</mass>
           <inertia><ixx>0.02</ixx><iyy>0.02</iyy><izz>0.02</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
         </inertial>
-        <collision name="left_wheel_collision"><geometry><cylinder><radius>0.17</radius><length>0.12</length></cylinder></geometry></collision>
+        <collision name="left_wheel_collision">
+          <geometry><cylinder><radius>0.17</radius><length>0.10</length></cylinder></geometry>
+          <surface><friction><ode><mu>1.6</mu><mu2>1.6</mu2></ode></friction></surface>
+        </collision>
         <visual name="left_wheel_visual">
           <geometry><cylinder><radius>0.17</radius><length>0.12</length></cylinder></geometry>
           <material><ambient>0.01 0.01 0.01 1</ambient><diffuse>0.04 0.04 0.04 1</diffuse></material>
@@ -745,12 +768,15 @@
       </link>
 
       <link name="right_wheel">
-        <pose>0 -0.43 -0.18 1.5708 0 0</pose>
+        <pose>0 -0.43 -0.18 -1.5708 0 0</pose>
         <inertial>
           <mass>1.0</mass>
           <inertia><ixx>0.02</ixx><iyy>0.02</iyy><izz>0.02</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
         </inertial>
-        <collision name="right_wheel_collision"><geometry><cylinder><radius>0.17</radius><length>0.12</length></cylinder></geometry></collision>
+        <collision name="right_wheel_collision">
+          <geometry><cylinder><radius>0.17</radius><length>0.10</length></cylinder></geometry>
+          <surface><friction><ode><mu>1.6</mu><mu2>1.6</mu2></ode></friction></surface>
+        </collision>
         <visual name="right_wheel_visual">
           <geometry><cylinder><radius>0.17</radius><length>0.12</length></cylinder></geometry>
           <material><ambient>0.01 0.01 0.01 1</ambient><diffuse>0.04 0.04 0.04 1</diffuse></material>
@@ -759,6 +785,10 @@
 
       <link name="camera_link">
         <pose>0.95 0 1.18 0 0 0</pose>
+        <inertial>
+          <mass>0.10</mass>
+          <inertia><ixx>0.001</ixx><iyy>0.001</iyy><izz>0.001</izz><ixy>0</ixy><ixz>0</ixz><iyz>0</iyz></inertia>
+        </inertial>
         <sensor name="rgb_camera" type="camera">
           <always_on>true</always_on>
           <update_rate>20</update_rate>
@@ -783,13 +813,13 @@
       <joint name="left_wheel_joint" type="revolute">
         <parent>base_link</parent>
         <child>left_wheel</child>
-        <axis><xyz>0 1 0</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
+        <axis><xyz>0 0 1</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit><dynamics><damping>0.2</damping><friction>0.02</friction></dynamics></axis>
       </joint>
 
       <joint name="right_wheel_joint" type="revolute">
         <parent>base_link</parent>
         <child>right_wheel</child>
-        <axis><xyz>0 1 0</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
+        <axis><xyz>0 0 1</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit><dynamics><damping>0.2</damping><friction>0.02</friction></dynamics></axis>
       </joint>
 
       <joint name="camera_fixed_joint" type="fixed">

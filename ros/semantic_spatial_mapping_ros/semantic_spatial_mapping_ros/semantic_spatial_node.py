@@ -106,7 +106,7 @@ class SemanticSpatialNode(Node):
             qos_profile_sensor_data,
         )
 
-        if isinstance(self.pose_provider, RosOdometryPoseProvider):
+        if isinstance(self.pose_provider, RosOdometryPoseProvider) or getattr(self.pose_provider, "wants_odom_topic", False):
             self.create_subscription(
                 Odometry,
                 self.config.topics.odom,

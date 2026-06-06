@@ -64,6 +64,57 @@ class RosPoseStampedPoseProvider(ExternalPoseProvider):
         )
 
 
+
+
+class VslamOdomFallbackPoseProvider(VisualOdometryPoseProvider):
+    source_name = "internal_vslam"
+    wants_odom_topic = True
+
+    def __init__(self, config: RuntimeConfig):
+        super().__init__(config)
+        self.max_age_sec = float(config.pose.max_age_sec)
+        self._latest_odom = None
+
+    def callback(self, msg: Odometry) -> None:
+        T_world_base = pose_msg_to_matrix(msg.pose.pose)
+        T_base_cam = matrix4(
+            self.config.extrinsics.base_to_camera,
+            "extrinsics.base_to_camera",
+        )
+        if T_base_cam is None:
+            return
+        self._latest_odom = PoseEstimate(
+            success=True,
+            timestamp=stamp_to_sec(msg.header.stamp),
+            T_world_cam=T_world_base @ T_base_cam,
+            source="odom_fallback",
+            contract="T_world_cam",
+            frame_id=msg.header.frame_id or self.config.frames.odom_frame,
+            child_frame_id=self.config.frames.camera_frame,
+            status="OK",
+        )
+
+    def update(self, frame_packet) -> PoseEstimate:
+        vo_pose = super().update(frame_packet)
+        if vo_pose.success:
+            return vo_pose
+        if self._latest_odom is None:
+            return vo_pose
+        age = frame_packet.timestamp - self._latest_odom.timestamp
+        if self.max_age_sec > 0.0 and age > self.max_age_sec:
+            return vo_pose
+        return PoseEstimate(
+            success=True,
+            timestamp=self._latest_odom.timestamp,
+            T_world_cam=self._latest_odom.T_world_cam,
+            source="internal_vslam_odom_fallback",
+            contract="T_world_cam",
+            frame_id=self._latest_odom.frame_id,
+            child_frame_id=self._latest_odom.child_frame_id,
+            status=f"VSLAM_{vo_pose.status}_ODOM_FALLBACK",
+        )
+
+
 class TfPoseProvider(PoseProvider):
     source_name = "tf"
 
@@ -162,7 +213,7 @@ def build_pose_provider(config: RuntimeConfig, tf_buffer: Buffer | None = None) 
             raise ValueError("TF pose source requires a tf2_ros.Buffer")
         return TfPoseProvider(config, tf_buffer)
     if source in ("internal_vslam", "vslam", "vo"):
-        return VisualOdometryPoseProvider(config)
+        return VslamOdomFallbackPoseProvider(config)
     if source in ("identity", "none", "degraded"):
         return StaticIdentityPoseProvider()
     raise ValueError(f"Unsupported pose source: {config.pose.source}")

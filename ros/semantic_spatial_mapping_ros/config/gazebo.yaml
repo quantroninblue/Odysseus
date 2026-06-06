@@ -36,30 +36,30 @@ depth:
   stride: 4
 
 pose:
-  source: odom
-  input_pose: world_base
+  source: internal_vslam
+  input_pose: world_camera
   max_age_sec: 0.25
   max_jump_m: 5.0
   max_translation_norm_m: 10000.0
-  publish_internal_vslam: false
+  publish_internal_vslam: true
   tf_timeout_sec: 0.05
 
 vslam:
-  enabled: false
-  local_mapping: false
+  enabled: true
+  local_mapping: true
   loop_detection: false
   use_bow_vocab: false
   scale_mode: rgbd
 
 segmentation:
-  enabled: false
-  backend: disabled
+  enabled: true
+  backend: gazebo_depth
   model_path: yolov8n-seg.pt
   confidence_threshold: 0.45
-  minimum_mask_area: 1500
+  minimum_mask_area: 450
   max_masks_per_frame: 8
   min_depth_support_ratio: 0.05
-  max_border_touch_ratio: 0.35
+  max_border_touch_ratio: 0.85
   publish_overlay: false
 
 mapping:

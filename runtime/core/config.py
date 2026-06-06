@@ -208,7 +208,7 @@ def validate_runtime_config(config: RuntimeConfig) -> None:
     if config.mapping.publish_every_n_frames <= 0:
         errors.append("mapping.publish_every_n_frames must be positive")
 
-    valid_segmentation_backends = {"disabled", "mock", "yolo"}
+    valid_segmentation_backends = {"disabled", "mock", "yolo", "gazebo_depth", "depth"}
     if config.segmentation.backend.lower() not in valid_segmentation_backends:
         errors.append(
             f"segmentation.backend must be one of {sorted(valid_segmentation_backends)}"

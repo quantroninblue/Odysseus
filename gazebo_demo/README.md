@@ -21,10 +21,10 @@ Terminal 1: open Gazebo Sim with the factory world.
 ```bash
 source /opt/ros/jazzy/setup.bash
 cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
-gz sim gazebo_demo/factory_obstacle_demo.world
+gz sim -r gazebo_demo/factory_obstacle_demo.world
 ```
 
-Press Play in the Gazebo GUI if the simulation opens paused.
+The `-r` flag starts the simulation running immediately.
 
 Terminal 2: bridge Gazebo camera, depth, odom, and command topics into ROS.
 

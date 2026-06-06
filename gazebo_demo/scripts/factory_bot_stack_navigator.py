@@ -34,6 +34,11 @@ from std_msgs.msg import String
 ROS_CMD_TOPIC = "/factory_bot/cmd_vel"
 TARGET_X = 14.0
 TARGET_Y = 10.2
+MAX_FORWARD_SPEED = 0.30
+LOW_OBSTACLE_SLOW_DIST = 4.25
+LOW_OBSTACLE_REROUTE_DIST = 3.25
+NEAR_OBSTACLE_DIST = 1.35
+ESCAPE_OBSTACLE_DIST = 0.95
 
 
 @dataclass
@@ -45,6 +50,13 @@ class Pose2D:
     stamp: float
 
 
+@dataclass
+class LocalPlan:
+    heading_error: float
+    clearance: float
+    mode: str
+
+
 class FactoryBotStackNavigator(Node):
     def __init__(self):
         super().__init__("factory_bot_stack_navigator")
@@ -54,8 +66,11 @@ class FactoryBotStackNavigator(Node):
         self.rgb_encoding = ""
         self.target_marker_seen = False
         self.pose: Optional[Pose2D] = None
+        self.odom_pose: Optional[Pose2D] = None
+        self.vslam_pose: Optional[Pose2D] = None
         self.last_diag = ""
         self.last_objects = ""
+        self.semantic_objects = []
         self.last_log = 0.0
         self.last_depth_stamp = 0.0
         self.last_pose_stamp = 0.0
@@ -63,6 +78,20 @@ class FactoryBotStackNavigator(Node):
         self.prev_heading_error = 0.0
         self.detour_sign = 1.0
         self.arrived = False
+        self.best_distance = float("inf")
+        self.last_best_time = 0.0
+        self.last_commanded_linear = 0.0
+        self.last_commanded_angular = 0.0
+        self.recovery_until = 0.0
+        self.recovery_reverse_until = 0.0
+        self.recovery_phase = ""
+        self.recovery_turn_sign = 1.0
+        self.detour_until = 0.0
+        self.last_plan = LocalPlan(0.0, 8.0, "direct")
+        self.last_motion_check_time = 0.0
+        self.last_motion_check_x = 0.0
+        self.last_motion_check_y = 0.0
+        self.stuck_since = 0.0
 
         self.create_subscription(Image, "/camera/depth/image_raw", self.on_depth, 10)
         self.create_subscription(Image, "/camera/color/image_raw", self.on_rgb, 10)
@@ -85,19 +114,23 @@ class FactoryBotStackNavigator(Node):
         self.target_marker_seen = green_target_visible(self.rgb)
 
     def on_vo(self, msg: Odometry) -> None:
-        self.pose = odom_to_pose2d(msg, "vslam")
-        self.last_pose_stamp = self.get_clock().now().nanoseconds * 1e-9
+        self.vslam_pose = odom_to_pose2d(msg, "vslam")
 
     def on_odom(self, msg: Odometry) -> None:
-        if self.pose is None or self.pose.source != "vslam":
-            self.pose = odom_to_pose2d(msg, "odom")
-            self.last_pose_stamp = self.get_clock().now().nanoseconds * 1e-9
+        self.odom_pose = odom_to_pose2d(msg, "odom_control")
+        self.pose = self.odom_pose
+        self.last_pose_stamp = self.get_clock().now().nanoseconds * 1e-9
 
     def on_diag(self, msg: String) -> None:
         self.last_diag = msg.data
 
     def on_objects(self, msg: String) -> None:
         self.last_objects = msg.data
+        try:
+            parsed = json.loads(msg.data) if msg.data else []
+        except json.JSONDecodeError:
+            parsed = []
+        self.semantic_objects = parsed if isinstance(parsed, list) else []
 
     def tick(self) -> None:
         if self.arrived:
@@ -141,50 +174,192 @@ class FactoryBotStackNavigator(Node):
         front = sectors["front"]
         left = sectors["left"]
         right = sectors["right"]
-        near = min(front, left, right)
+        lower_front = sectors["lower_front"]
+        lower_left = sectors["lower_left"]
+        lower_right = sectors["lower_right"]
+        front_close = min(front, lower_front)
+        left_clear = min(left, lower_left)
+        right_clear = min(right, lower_right)
+        plan = depth_occupancy_plan(self.depth, heading_error, self.detour_sign)
+        self.last_plan = plan
+        front_clear = min(front, plan.clearance, lower_front)
+        near = min(front_close, left_clear, right_clear)
+        stuck = self.update_stuck_state(now, distance)
+
+        if self.best_distance == float("inf"):
+            self.best_distance = distance
+            self.last_best_time = now
+        elif distance < self.best_distance - 0.10:
+            self.best_distance = distance
+            self.last_best_time = now
+
+        if now < self.recovery_until:
+            if now < self.recovery_reverse_until:
+                mode = "escape_reverse"
+                linear = -0.16
+                angular = -0.35 * self.recovery_turn_sign
+            else:
+                mode = "escape_turn"
+                linear = 0.02
+                angular = 0.95 * self.recovery_turn_sign
+            self.publish_and_log(now, mode, sectors, distance, heading_error, linear, angular)
+            return
+
+        boxed_in = front_close < ESCAPE_OBSTACLE_DIST
+        stalled = distance > 0.9 and self.last_commanded_linear > 0.12 and now - self.last_best_time > 3.0
+        if boxed_in or stuck or stalled:
+            if abs(left_clear - right_clear) > 0.15:
+                self.detour_sign = 1.0 if left_clear > right_clear else -1.0
+            elif abs(plan.heading_error) > 0.10:
+                self.detour_sign = 1.0 if plan.heading_error > 0.0 else -1.0
+            elif abs(heading_error) > 0.10:
+                self.detour_sign = 1.0 if heading_error > 0.0 else -1.0
+            self.start_recovery(now, self.detour_sign)
+            self.publish_and_log(now, "escape_reverse", sectors, distance, heading_error, -0.16, -0.35 * self.detour_sign)
+            return
 
         mode = "clear_path"
-        if front < 0.75:
-            if abs(left - right) > 0.15:
-                self.detour_sign = 1.0 if left > right else -1.0
-            elif abs(heading_error) > 0.12:
-                self.detour_sign = 1.0 if heading_error > 0.0 else -1.0
-            linear = 0.05
-            obstacle_bias = 0.90 * self.detour_sign
-            mode = "blocked_turning"
-        elif front < 1.25:
-            if abs(left - right) > 0.12:
-                self.detour_sign = 1.0 if left > right else -1.0
-            linear = 0.12
-            obstacle_bias = 0.48 * self.detour_sign
-            mode = "slow_near_obstacle"
-        elif near < 1.0:
+        control_heading_error = heading_error
+        if front_close < NEAR_OBSTACLE_DIST:
+            if abs(left_clear - right_clear) > 0.15:
+                self.detour_sign = 1.0 if left_clear > right_clear else -1.0
+            linear = 0.00
+            control_heading_error = 0.85 * self.detour_sign
+            obstacle_bias = 0.85 * self.detour_sign
+            self.detour_until = now + 1.5
+            mode = "blocked_turn"
+        elif lower_front < LOW_OBSTACLE_REROUTE_DIST or front_clear < 2.45:
+            if abs(left_clear - right_clear) > 0.12:
+                self.detour_sign = 1.0 if left_clear > right_clear else -1.0
+            elif abs(plan.heading_error) > 0.10:
+                self.detour_sign = 1.0 if plan.heading_error > 0.0 else -1.0
+            linear = 0.06
+            control_heading_error = max(abs(plan.heading_error), 0.75) * self.detour_sign
+            obstacle_bias = 0.65 * self.detour_sign
+            self.detour_until = now + 2.2
+            mode = "reroute_low_obstacle" if lower_front < LOW_OBSTACLE_REROUTE_DIST else "reroute_near_obstacle"
+        elif plan.mode == "occupancy_detour" and plan.clearance < 2.7:
+            if abs(left_clear - right_clear) > 0.20:
+                self.detour_sign = 1.0 if left_clear > right_clear else -1.0
+            elif abs(plan.heading_error) > 0.08:
+                self.detour_sign = 1.0 if plan.heading_error > 0.0 else -1.0
             linear = 0.14
-            obstacle_bias = -0.28 if left < right else 0.28
+            control_heading_error = plan.heading_error
+            obstacle_bias = 0.35 * self.detour_sign
+            self.detour_until = now + 1.0
+            mode = "depth_occupancy_reroute"
+        elif now < self.detour_until and abs(heading_error) < 1.0:
+            linear = 0.12
+            control_heading_error = max(abs(heading_error), 0.35) * self.detour_sign
+            obstacle_bias = 0.22 * self.detour_sign
+            mode = "detour_commit"
+        elif lower_front < LOW_OBSTACLE_SLOW_DIST:
+            if abs(left_clear - right_clear) > 0.15:
+                self.detour_sign = 1.0 if left_clear > right_clear else -1.0
+            linear = 0.14
+            control_heading_error = max(abs(heading_error), 0.22) * self.detour_sign
+            obstacle_bias = 0.22 * self.detour_sign
+            mode = "low_obstacle_caution"
+        elif near < 1.4:
+            linear = 0.12
+            obstacle_bias = -0.45 if left_clear < right_clear else 0.45
             mode = "side_obstacle"
         elif front > 3.0 and abs(heading_error) < 0.45:
-            linear = 0.38 if not self.target_marker_seen else 0.30
+            linear = MAX_FORWARD_SPEED if not self.target_marker_seen else 0.24
             obstacle_bias = 0.0
             mode = "open_path_speedup"
         else:
-            linear = 0.22
+            linear = 0.18
             obstacle_bias = 0.0
 
-        if abs(heading_error) > 1.2:
+        if abs(control_heading_error) > 1.2:
             linear = min(linear, 0.08)
 
-        self.integral_heading = float(np.clip(self.integral_heading + heading_error * 0.2, -1.0, 1.0))
-        derivative = (heading_error - self.prev_heading_error) / 0.2
-        self.prev_heading_error = heading_error
-        angular = 0.85 * heading_error + 0.02 * self.integral_heading + 0.035 * derivative + obstacle_bias
+        self.integral_heading = float(np.clip(self.integral_heading + control_heading_error * 0.2, -1.0, 1.0))
+        derivative = (control_heading_error - self.prev_heading_error) / 0.2
+        self.prev_heading_error = control_heading_error
+        if mode in {"depth_occupancy_reroute", "detour_commit", "reroute_near_obstacle", "blocked_turn", "side_obstacle"}:
+            heading_gain = 0.28
+            derivative_gain = 0.010
+        else:
+            heading_gain = 0.85
+            derivative_gain = 0.035
+        angular = heading_gain * control_heading_error + 0.02 * self.integral_heading + derivative_gain * derivative + obstacle_bias
         angular = float(np.clip(angular, -0.95, 0.95))
         if abs(angular) > 0.80:
             linear = min(linear, 0.12)
         elif abs(angular) > 0.55:
             linear = min(linear, 0.22)
-        linear = float(np.clip(linear, 0.0, 0.38))
+        linear = float(np.clip(linear, -0.18, MAX_FORWARD_SPEED))
 
+        self.publish_and_log(now, mode, sectors, distance, heading_error, linear, angular)
+
+    def start_recovery(self, now: float, turn_sign: float) -> None:
+        self.recovery_turn_sign = float(1.0 if turn_sign >= 0.0 else -1.0)
+        self.recovery_phase = "escape"
+        self.recovery_reverse_until = now + 1.8
+        self.recovery_until = now + 4.2
+        self.detour_until = now + 4.5
+        self.last_best_time = now
+        self.stuck_since = 0.0
+
+    def update_stuck_state(self, now: float, distance: float) -> bool:
+        if self.pose is None or distance < 0.9:
+            self.stuck_since = 0.0
+            return False
+        if self.last_motion_check_time <= 0.0:
+            self.last_motion_check_time = now
+            self.last_motion_check_x = self.pose.x
+            self.last_motion_check_y = self.pose.y
+            return False
+        if now - self.last_motion_check_time < 1.1:
+            return False
+
+        moved = math.hypot(self.pose.x - self.last_motion_check_x, self.pose.y - self.last_motion_check_y)
+        commanded_forward = self.last_commanded_linear > 0.10
+        self.last_motion_check_time = now
+        self.last_motion_check_x = self.pose.x
+        self.last_motion_check_y = self.pose.y
+        if commanded_forward and moved < 0.035:
+            if self.stuck_since <= 0.0:
+                self.stuck_since = now
+            return now - self.stuck_since > 1.2
+        self.stuck_since = 0.0
+        return False
+
+    def semantic_object_hazard(self) -> tuple[float, float]:
+        if self.pose is None or not self.semantic_objects:
+            return 8.0, 0.0
+        c = math.cos(-self.pose.yaw)
+        s = math.sin(-self.pose.yaw)
+        best_forward = 8.0
+        best_lateral = 0.0
+        for obj in self.semantic_objects:
+            centroid = obj.get("centroid") if isinstance(obj, dict) else None
+            if not isinstance(centroid, list) or len(centroid) < 2:
+                continue
+            dx = float(centroid[0]) - self.pose.x
+            dy = float(centroid[1]) - self.pose.y
+            forward = c * dx - s * dy
+            lateral = s * dx + c * dy
+            if 0.2 < forward < 4.0 and abs(lateral) < 1.15 and forward < best_forward:
+                best_forward = forward
+                best_lateral = lateral
+        return best_forward, best_lateral
+
+    def publish_and_log(
+        self,
+        now: float,
+        mode: str,
+        sectors: dict[str, float],
+        distance: float,
+        heading_error: float,
+        linear: float,
+        angular: float,
+    ) -> None:
         self.publish_cmd(linear, angular)
+        self.last_commanded_linear = linear
+        self.last_commanded_angular = angular
         if now - self.last_log > 0.8:
             self.last_log = now
             diag_summary = summarize_json(self.last_diag)
@@ -192,13 +367,15 @@ class FactoryBotStackNavigator(Node):
             self.get_logger().info(
                 "perception "
                 f"mode={mode} depth_encoding={self.depth_encoding} "
-                f"front={front:.2f}m left={left:.2f}m right={right:.2f}m "
+                f"front={sectors['front']:.2f}m lower_front={sectors['lower_front']:.2f}m "
+                f"left={sectors['left']:.2f}m right={sectors['right']:.2f}m "
                 f"goal_dist={distance:.2f}m heading_err={heading_error:.2f}rad "
+                f"plan={self.last_plan.mode}:{self.last_plan.clearance:.2f}m/{self.last_plan.heading_error:.2f}rad "
                 f"cmd_v={linear:.2f} cmd_w={angular:.2f} pose_source={self.pose.source} "
+                f"vslam_pose={'yes' if self.vslam_pose is not None else 'no'} "
                 f"target_marker_seen={self.target_marker_seen} rgb_encoding={self.rgb_encoding or 'none'} "
                 f"diag={diag_summary} objects={object_summary}"
             )
-
 
     def publish_cmd(self, linear_x: float, angular_z: float) -> None:
         msg = Twist()
@@ -256,19 +433,76 @@ def green_target_visible(rgb: Optional[np.ndarray]) -> bool:
     return float(np.count_nonzero(green)) / float(green.size) > 0.012
 
 
+def depth_occupancy_plan(depth: np.ndarray, goal_heading_error: float, detour_sign: float) -> LocalPlan:
+    h, w = depth.shape[:2]
+    # Stay above the floor-heavy lower image rows. Low obstacles are still handled by
+    # the close-range lower sector checks in depth_sectors().
+    band = depth[int(h * 0.20):int(h * 0.56):4, int(w * 0.08):int(w * 0.92):4]
+    if band.size == 0:
+        return LocalPlan(goal_heading_error, 8.0, "direct")
+
+    ys, xs = np.indices(band.shape)
+    x_offset = int(w * 0.08)
+    cols = xs.reshape(-1) * 4 + x_offset
+    ranges = band.reshape(-1).astype(np.float32)
+    valid = np.isfinite(ranges) & (ranges > 0.25) & (ranges < 4.8)
+    if np.count_nonzero(valid) < 20:
+        return LocalPlan(goal_heading_error, 8.0, "direct")
+
+    ranges = ranges[valid]
+    cols = cols[valid]
+    hfov = 1.047
+    angles = ((cols.astype(np.float32) / max(float(w - 1), 1.0)) - 0.5) * hfov
+    forward = ranges * np.cos(angles)
+    lateral = ranges * np.sin(angles)
+    useful = (forward > 0.25) & (forward < 4.8) & (np.abs(lateral) < 2.2)
+    if np.count_nonzero(useful) < 20:
+        return LocalPlan(goal_heading_error, 8.0, "direct")
+    forward = forward[useful]
+    lateral = lateral[useful]
+
+    candidates = np.linspace(-0.85, 0.85, 19)
+    goal = float(np.clip(goal_heading_error, -0.85, 0.85))
+    best_heading = goal
+    best_clearance = 0.0
+    best_cost = float("inf")
+    for heading in candidates:
+        corridor_center = forward * math.tan(float(heading))
+        corridor_width = 0.42 + 0.10 * np.clip(forward, 0.0, 4.0)
+        in_corridor = np.abs(lateral - corridor_center) < corridor_width
+        clearance = float(np.percentile(forward[in_corridor], 15.0)) if np.any(in_corridor) else 8.0
+        clearance_penalty = 2.1 / max(clearance, 0.25)
+        blocked_penalty = 7.0 if clearance < 1.15 else 0.0
+        turn_bias = 0.06 * abs(float(heading) - float(detour_sign) * 0.40)
+        cost = 1.35 * abs(float(heading) - goal) + clearance_penalty + blocked_penalty + turn_bias
+        if cost < best_cost:
+            best_cost = cost
+            best_heading = float(heading)
+            best_clearance = clearance
+
+    mode = "direct" if best_clearance > 3.0 and abs(best_heading - goal) < 0.16 else "occupancy_detour"
+    return LocalPlan(float(best_heading), float(best_clearance), mode)
+
+
 def depth_sectors(depth: np.ndarray) -> dict[str, float]:
     h, w = depth.shape[:2]
-    # Use the upper-middle image band so the floor and robot chassis do not dominate near-range readings.
-    y0, y1 = int(h * 0.18), int(h * 0.52)
+    # The upper band sees tall obstacles; the lower-middle band catches low boxes and pallets
+    # without looking so far down that floor returns dominate the decision.
+    upper_y0, upper_y1 = int(h * 0.18), int(h * 0.52)
+    lower_y0, lower_y1 = int(h * 0.46), int(h * 0.72)
     bands = {
-        "left": depth[y0:y1, int(w * 0.05):int(w * 0.35)],
-        "front": depth[y0:y1, int(w * 0.35):int(w * 0.65)],
-        "right": depth[y0:y1, int(w * 0.65):int(w * 0.95)],
+        "left": depth[upper_y0:upper_y1, int(w * 0.05):int(w * 0.35)],
+        "front": depth[upper_y0:upper_y1, int(w * 0.35):int(w * 0.65)],
+        "right": depth[upper_y0:upper_y1, int(w * 0.65):int(w * 0.95)],
+        "lower_left": depth[lower_y0:lower_y1, int(w * 0.08):int(w * 0.35)],
+        "lower_front": depth[lower_y0:lower_y1, int(w * 0.35):int(w * 0.65)],
+        "lower_right": depth[lower_y0:lower_y1, int(w * 0.65):int(w * 0.92)],
     }
     out = {}
     for name, band in bands.items():
         valid = band[np.isfinite(band) & (band > 0.12)]
-        out[name] = float(np.percentile(valid, 35.0)) if valid.size else 8.0
+        percentile = 25.0 if name.startswith("lower_") else 35.0
+        out[name] = float(np.percentile(valid, percentile)) if valid.size else 8.0
     return out
 
 
@@ -295,6 +529,11 @@ def summarize_json(raw: str) -> str:
     for key in ["health", "tracking_ok", "camera_info_ready", "map_points", "semantic_objects", "last_error"]:
         if key in data:
             parts.append(f"{key}={data[key]}")
+    messages = data.get("messages")
+    if isinstance(messages, dict):
+        for key in ["pose_source", "pose_status"]:
+            if key in messages:
+                parts.append(f"{key}={messages[key]}")
     return ",".join(parts) if parts else "ok"
 
 

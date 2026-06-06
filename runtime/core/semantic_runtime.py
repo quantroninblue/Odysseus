@@ -54,6 +54,7 @@ class DeploymentSemanticRuntime:
         )
         self._extractor: Optional[ObjectPointCloudExtractor] = None
         self._last_valid_T_world_cam: Optional[np.ndarray] = None
+        self._last_valid_pose_source: Optional[str] = None
 
     def update(self, packet: FramePacket) -> RuntimeOutput:
         t0 = time.perf_counter()
@@ -69,6 +70,8 @@ class DeploymentSemanticRuntime:
         self.diagnostics.pose_source_active = pose.success
         self.diagnostics.tracking_ok = pose.success
         self.diagnostics.pose_age_sec = max(0.0, packet.timestamp - pose.timestamp)
+        self.diagnostics.messages["pose_source"] = pose.source
+        self.diagnostics.messages["pose_status"] = pose.status
 
         seg_t0 = time.perf_counter()
         raw_segmentation = self._segment(packet)
@@ -149,6 +152,7 @@ class DeploymentSemanticRuntime:
 
         if pose.success:
             self._last_valid_T_world_cam = pose.T_world_cam.copy()
+            self._last_valid_pose_source = pose.source
 
         self.diagnostics.processed_frames += 1
         self.diagnostics.map_points = len(self.world_map.get_all_points())
@@ -181,7 +185,10 @@ class DeploymentSemanticRuntime:
     def _segment(self, packet: FramePacket) -> Optional[dict]:
         if self.segmentation is None or not self.config.segmentation.enabled:
             return {"overlay": packet.rgb_frame, "masks": [], "obbs": [], "elapsed_ms": 0.0}
-        return self.segmentation.segment(packet.rgb_frame)
+        try:
+            return self.segmentation.segment(packet.rgb_frame, depth_frame=packet.depth_frame)
+        except TypeError:
+            return self.segmentation.segment(packet.rgb_frame)
 
     def _validate_pose(self, pose: PoseEstimate, timestamp: float) -> PoseEstimate:
         if not pose.success:
@@ -208,7 +215,15 @@ class DeploymentSemanticRuntime:
                 ),
             )
 
-        if self._last_valid_T_world_cam is not None and self.config.pose.max_jump_m > 0.0:
+        source_changed = (
+            self._last_valid_pose_source is not None
+            and pose.source != self._last_valid_pose_source
+        )
+        if (
+            self._last_valid_T_world_cam is not None
+            and self.config.pose.max_jump_m > 0.0
+            and not source_changed
+        ):
             jump = float(
                 np.linalg.norm(T[:3, 3] - self._last_valid_T_world_cam[:3, 3])
             )

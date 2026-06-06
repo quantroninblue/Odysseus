@@ -86,6 +86,11 @@ class VisualOdometryPoseProvider(PoseProvider):
             )
             vo_config = VOConfig(
                 scale_mode=self.config.vslam.scale_mode,
+                max_features=3000,
+                min_inliers=8,
+                rgbd_min_depth_features=6,
+                pnp_reproj_thresh=5.0,
+                max_pose_step_m=5.0,
             )
             self.vo = VisualOdometry(camera=camera, config=vo_config)
 

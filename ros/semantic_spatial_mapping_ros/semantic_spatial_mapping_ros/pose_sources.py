@@ -20,24 +20,50 @@ class RosOdometryPoseProvider(ExternalPoseProvider):
     def __init__(self, config: RuntimeConfig):
         super().__init__("odom", max_age_sec=config.pose.max_age_sec)
         self.config = config
+        self._fallback = None
 
     def callback(self, msg: Odometry) -> None:
+        self.set_latest(self._pose_from_msg(msg, source=self.source_name, status="OK"))
+
+    def fallback_callback(self, msg: Odometry) -> None:
+        self._fallback = self._pose_from_msg(
+            msg,
+            source="fallback_odom",
+            status="RAW_ODOM_FALLBACK",
+        )
+
+    def update(self, frame_packet) -> PoseEstimate:
+        primary = super().update(frame_packet)
+        if primary.success:
+            return primary
+        fallback = self._fresh_fallback(frame_packet)
+        if fallback is not None:
+            return fallback
+        return primary
+
+    def _pose_from_msg(self, msg: Odometry, source: str, status: str) -> PoseEstimate:
         T_world_cam = ros_pose_to_runtime_camera_pose(
             pose_matrix=pose_msg_to_matrix(msg.pose.pose),
             config=self.config,
         )
-        self.set_latest(
-            PoseEstimate(
-                success=True,
-                timestamp=stamp_to_sec(msg.header.stamp),
-                T_world_cam=T_world_cam,
-                source=self.source_name,
-                contract="T_world_cam",
-                frame_id=msg.header.frame_id or self.config.frames.odom_frame,
-                child_frame_id=self.config.frames.camera_frame,
-                status="OK",
-            )
+        return PoseEstimate(
+            success=True,
+            timestamp=stamp_to_sec(msg.header.stamp),
+            T_world_cam=T_world_cam,
+            source=source,
+            contract="T_world_cam",
+            frame_id=msg.header.frame_id or self.config.frames.odom_frame,
+            child_frame_id=self.config.frames.camera_frame,
+            status=status,
         )
+
+    def _fresh_fallback(self, frame_packet) -> PoseEstimate | None:
+        if self._fallback is None:
+            return None
+        age = frame_packet.timestamp - self._fallback.timestamp
+        if self.max_age_sec > 0.0 and age > self.max_age_sec:
+            return None
+        return self._fallback
 
 
 class RosPoseStampedPoseProvider(ExternalPoseProvider):
@@ -74,43 +100,74 @@ class VslamOdomFallbackPoseProvider(VisualOdometryPoseProvider):
         super().__init__(config)
         self.max_age_sec = float(config.pose.max_age_sec)
         self._latest_odom = None
+        self._latest_fallback_odom = None
 
     def callback(self, msg: Odometry) -> None:
+        self._latest_odom = self._odom_pose_from_msg(msg, source="filtered_odom_fallback")
+
+    def fallback_callback(self, msg: Odometry) -> None:
+        self._latest_fallback_odom = self._odom_pose_from_msg(msg, source="raw_odom_fallback")
+
+    def update(self, frame_packet) -> PoseEstimate:
+        vo_pose = super().update(frame_packet)
+        if vo_pose.success:
+            return vo_pose
+
+        primary_odom = self._fresh_odom(frame_packet, self._latest_odom)
+        if primary_odom is not None:
+            return self._runtime_fallback_pose(
+                primary_odom,
+                vo_pose,
+                source="internal_vslam_filtered_odom_fallback",
+            )
+
+        fallback_odom = self._fresh_odom(frame_packet, self._latest_fallback_odom)
+        if fallback_odom is not None:
+            return self._runtime_fallback_pose(
+                fallback_odom,
+                vo_pose,
+                source="internal_vslam_raw_odom_fallback",
+            )
+
+        return vo_pose
+
+    def _odom_pose_from_msg(self, msg: Odometry, source: str) -> PoseEstimate | None:
         T_world_base = pose_msg_to_matrix(msg.pose.pose)
         T_base_cam = matrix4(
             self.config.extrinsics.base_to_camera,
             "extrinsics.base_to_camera",
         )
         if T_base_cam is None:
-            return
-        self._latest_odom = PoseEstimate(
+            return None
+        return PoseEstimate(
             success=True,
             timestamp=stamp_to_sec(msg.header.stamp),
             T_world_cam=T_world_base @ T_base_cam,
-            source="odom_fallback",
+            source=source,
             contract="T_world_cam",
             frame_id=msg.header.frame_id or self.config.frames.odom_frame,
             child_frame_id=self.config.frames.camera_frame,
             status="OK",
         )
 
-    def update(self, frame_packet) -> PoseEstimate:
-        vo_pose = super().update(frame_packet)
-        if vo_pose.success:
-            return vo_pose
-        if self._latest_odom is None:
-            return vo_pose
-        age = frame_packet.timestamp - self._latest_odom.timestamp
+    def _fresh_odom(self, frame_packet, estimate) -> PoseEstimate | None:
+        if estimate is None:
+            return None
+        age = frame_packet.timestamp - estimate.timestamp
         if self.max_age_sec > 0.0 and age > self.max_age_sec:
-            return vo_pose
+            return None
+        return estimate
+
+    @staticmethod
+    def _runtime_fallback_pose(odom_pose: PoseEstimate, vo_pose: PoseEstimate, source: str) -> PoseEstimate:
         return PoseEstimate(
             success=True,
-            timestamp=self._latest_odom.timestamp,
-            T_world_cam=self._latest_odom.T_world_cam,
-            source="internal_vslam_odom_fallback",
+            timestamp=odom_pose.timestamp,
+            T_world_cam=odom_pose.T_world_cam,
+            source=source,
             contract="T_world_cam",
-            frame_id=self._latest_odom.frame_id,
-            child_frame_id=self._latest_odom.child_frame_id,
+            frame_id=odom_pose.frame_id,
+            child_frame_id=odom_pose.child_frame_id,
             status=f"VSLAM_{vo_pose.status}_ODOM_FALLBACK",
         )
 

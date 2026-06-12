@@ -5,7 +5,9 @@ topics:
   depth: /camera/depth/image_raw
   rgb_camera_info: /camera/color/camera_info
   depth_camera_info: /camera/depth/camera_info
+  imu: /imu/data
   odom: /odom
+  fallback_odom: /odom
   pose: /pose
   semantic_points: /semantic_spatial/points
   semantic_objects: /semantic_spatial/objects
@@ -56,7 +58,7 @@ segmentation:
   backend: gazebo_depth
   model_path: yolov8n-seg.pt
   confidence_threshold: 0.45
-  minimum_mask_area: 450
+  minimum_mask_area: 60
   max_masks_per_frame: 8
   min_depth_support_ratio: 0.05
   max_border_touch_ratio: 0.85

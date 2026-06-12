@@ -113,6 +113,16 @@ class SemanticSpatialNode(Node):
                 self.pose_provider.callback,
                 qos,
             )
+            if (
+                self.config.topics.fallback_odom != self.config.topics.odom
+                and hasattr(self.pose_provider, "fallback_callback")
+            ):
+                self.create_subscription(
+                    Odometry,
+                    self.config.topics.fallback_odom,
+                    self.pose_provider.fallback_callback,
+                    qos,
+                )
         elif isinstance(self.pose_provider, RosPoseStampedPoseProvider):
             self.create_subscription(
                 PoseStamped,
@@ -212,7 +222,9 @@ class SemanticSpatialNode(Node):
             "depth": self.config.topics.depth,
             "rgb_camera_info": self.config.topics.rgb_camera_info,
             "depth_camera_info": self.config.topics.depth_camera_info,
+            "imu": self.config.topics.imu,
             "odom": self.config.topics.odom,
+            "fallback_odom": self.config.topics.fallback_odom,
             "pose": self.config.topics.pose,
             "semantic_points": self.config.topics.semantic_points,
             "semantic_objects": self.config.topics.semantic_objects,

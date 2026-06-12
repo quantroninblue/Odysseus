@@ -8,11 +8,14 @@ import numpy as np
 
 from geometry.transforms.camera_models import CameraIntrinsics
 from runtime.core.config import RuntimeConfig, load_runtime_config, validate_runtime_config
+from runtime.core.contracts import LocalObstacleMap, ObstacleObservation, PlannerCommand, RuntimeStamp
+from runtime.core.perception import semantic_frame_from_result
 from runtime.core.pose import PoseEstimate
 from runtime.core.pose_providers import ExternalPoseProvider, StaticIdentityPoseProvider
 from runtime.core.runtime_logger import RuntimeSessionLogger, default_rosbag_topics
 from runtime.core.segmentation import (
     DisabledSegmentationProvider,
+    GazeboDepthSegmentationProvider,
     MockSegmentationProvider,
     build_segmentation_provider,
 )
@@ -46,7 +49,12 @@ class _EmptySegmentation:
 
 class RuntimeCoreTests(unittest.TestCase):
     def test_shipped_configs_validate(self):
-        for name in ("gazebo.yaml", "embedded_oakd.yaml"):
+        for name in (
+            "gazebo.yaml",
+            "gazebo_fused.yaml",
+            "embedded_oakd.yaml",
+            "embedded_oakd_fused.yaml",
+        ):
             config = load_runtime_config(
                 REPO_ROOT / "ros" / "semantic_spatial_mapping_ros" / "config" / name
             )
@@ -57,6 +65,40 @@ class RuntimeCoreTests(unittest.TestCase):
         config.depth.depth_unit = 0.0
         with self.assertRaises(ValueError):
             validate_runtime_config(config)
+
+    def test_runtime_contracts_filter_stale_obstacles_and_clip_commands(self):
+        fresh = ObstacleObservation(
+            stamp=RuntimeStamp(time_sec=10.0, frame_id="base_link", source="depth"),
+            label="low_depth_obstacle",
+            confidence=0.9,
+            centroid_m=np.array([1.0, 0.2, 0.0], dtype=np.float32),
+            extent_m=np.array([0.2, 0.2, 0.8], dtype=np.float32),
+        )
+        stale = ObstacleObservation(
+            stamp=RuntimeStamp(time_sec=7.0, frame_id="base_link", source="semantic_map"),
+            label="low_depth_obstacle",
+            confidence=0.9,
+            centroid_m=np.array([1.0, -0.2, 0.0], dtype=np.float32),
+            extent_m=np.array([0.2, 0.2, 0.8], dtype=np.float32),
+        )
+        local_map = LocalObstacleMap(
+            stamp=RuntimeStamp(time_sec=10.0, frame_id="base_link", source="test"),
+            obstacles=[fresh, stale],
+            max_age_sec=1.0,
+        )
+
+        self.assertEqual(local_map.fresh_obstacles(now_sec=10.2), [fresh])
+
+        command = PlannerCommand(
+            stamp=RuntimeStamp(time_sec=10.2, frame_id="base_link", source="test"),
+            linear_x=2.0,
+            angular_z=-3.0,
+            mode="test",
+            reason="clip",
+        ).clipped(max_linear=0.3, max_angular=0.8)
+
+        self.assertEqual(command.linear_x, 0.3)
+        self.assertEqual(command.angular_z, -0.8)
 
     def test_bad_extrinsics_rejected(self):
         config = RuntimeConfig()
@@ -94,6 +136,53 @@ class RuntimeCoreTests(unittest.TestCase):
         self.assertIsInstance(provider, MockSegmentationProvider)
         result = provider.segment(np.zeros((16, 16, 3), dtype=np.uint8))
         self.assertEqual(len(result["masks"]), 1)
+
+    def test_gazebo_depth_segmentation_keeps_short_thin_obstacle(self):
+        config = RuntimeConfig()
+        config.segmentation.backend = "gazebo_depth"
+        config.segmentation.minimum_mask_area = 60
+        config.depth.depth_unit = 1.0
+        config.depth.max_m = 8.0
+        rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+        depth = np.full((480, 640), 8.0, dtype=np.float32)
+        depth[238:318, 318:322] = 2.0
+
+        result = GazeboDepthSegmentationProvider(config.segmentation).segment(rgb, depth)
+        semantic = semantic_frame_from_result(
+            result=result,
+            frame_id=0,
+            timestamp=1.0,
+            config=config,
+            depth_frame=depth,
+        )
+
+        self.assertGreaterEqual(len(result["masks"]), 1)
+        self.assertGreaterEqual(len(semantic.instances), 1)
+        self.assertEqual(semantic.instances[0].label, "low_depth_obstacle")
+        self.assertGreaterEqual(semantic.instances[0].area_px, 60)
+
+    def test_gazebo_depth_segmentation_keeps_tall_obstacle(self):
+        config = RuntimeConfig()
+        config.segmentation.backend = "gazebo_depth"
+        config.segmentation.minimum_mask_area = 60
+        config.depth.depth_unit = 1.0
+        config.depth.max_m = 8.0
+        rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+        depth = np.full((480, 640), 8.0, dtype=np.float32)
+        depth[120:330, 120:200] = 2.8
+
+        result = GazeboDepthSegmentationProvider(config.segmentation).segment(rgb, depth)
+        semantic = semantic_frame_from_result(
+            result=result,
+            frame_id=0,
+            timestamp=1.0,
+            config=config,
+            depth_frame=depth,
+        )
+
+        self.assertGreaterEqual(len(semantic.instances), 1)
+        self.assertIn(semantic.instances[0].label, {"depth_obstacle", "low_depth_obstacle"})
+        self.assertGreater(semantic.instances[0].area_px, 1000)
 
     def test_runtime_maps_synthetic_rgbd(self):
         config = RuntimeConfig()
@@ -292,6 +381,9 @@ class RuntimeCoreTests(unittest.TestCase):
         topics = default_rosbag_topics(config)
         self.assertIn(config.topics.rgb, topics)
         self.assertIn(config.topics.depth, topics)
+        self.assertIn(config.topics.imu, topics)
+        self.assertIn(config.topics.odom, topics)
+        self.assertIn(config.topics.fallback_odom, topics)
         self.assertIn(config.topics.semantic_objects, topics)
         self.assertIn(config.topics.diagnostics, topics)
 

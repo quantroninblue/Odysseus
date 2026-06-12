@@ -12,6 +12,7 @@ repo_packages = find_namespace_packages(
         "geometry", "geometry.*",
         "mapping", "mapping.*",
         "motion", "motion.*",
+        "planning", "planning.*",
         "runtime", "runtime.*",
         "segmentation", "segmentation.*",
         "tracking", "tracking.*",
@@ -29,6 +30,7 @@ setup(
         "geometry": "../../geometry",
         "mapping": "../../mapping",
         "motion": "../../motion",
+        "planning": "../../planning",
         "runtime": "../../runtime",
         "segmentation": "../../segmentation",
         "tracking": "../../tracking",
@@ -37,10 +39,25 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", [f"resource/{package_name}"]),
         (f"share/{package_name}", ["package.xml"]),
-        (f"share/{package_name}/config", ["config/gazebo.yaml", "config/embedded_oakd.yaml"]),
+        (
+            f"share/{package_name}/config",
+            [
+                "config/gazebo.yaml",
+                "config/gazebo_fused.yaml",
+                "config/gazebo_odom_imu_ekf.yaml",
+                "config/embedded_oakd.yaml",
+                "config/embedded_oakd_fused.yaml",
+                "config/embedded_odom_imu_ekf.yaml",
+            ],
+        ),
         (
             f"share/{package_name}/launch",
-            ["launch/gazebo_runtime.launch.py", "launch/embedded_runtime.launch.py"],
+            [
+                "launch/gazebo_runtime.launch.py",
+                "launch/gazebo_fused_runtime.launch.py",
+                "launch/embedded_runtime.launch.py",
+                "launch/embedded_fused_runtime.launch.py",
+            ],
         ),
     ],
     install_requires=["setuptools", "pyyaml"],

@@ -1,6 +1,8 @@
 # semantic_spatial_mapping
 
-Start here, then scroll to **05.06.26 Integration Report** below. That entry records the baseline repository state and the v2.0 integration changes.
+Start here for setup and architecture. The committed handover state for the
+`Vector_NN` work is summarized in this README, `gazebo_demo/README.md`, and
+`notes/architecture_contracts.md`.
 
 ## Current Purpose
 
@@ -23,6 +25,11 @@ RGB image + depth image + CameraInfo
     -> semantic object/entity fusion
     -> pose source or internal VSLAM
     -> world-frame map update
+    -> inflated local depth costmap
+    -> collision-checked trajectory rollout planner
+    -> engineered navigation memory features
+    -> optional GRU learned risk predictor
+    -> navigation intelligence / safety authority
     -> ROS diagnostics, clouds, objects, odometry, runtime report
 ```
 
@@ -32,13 +39,14 @@ RGB image + depth image + CameraInfo
 geometry/                    RGB-D geometry, camera models, transforms, point clouds
 mapping/global_map/           bounded world map and semantic object map
 motion/vo/                    visual odometry frontend and VSLAM backend scaffolding
-runtime/core/                 deployment runtime, config, diagnostics, logging, providers
+runtime/core/                 deployment runtime, contracts, diagnostics, intelligence, learning
 ros/semantic_spatial_mapping_ros/
                               ROS2 package, launch files, node, publishers, converters
 segmentation/                 YOLO reference segmentation backend
 tracking/                     temporal filtering and tracking references
-notes/                        setup notes and runtime validation checklist
-tests/                        no-runtime-data smoke and failure-mode tests
+notes/                        setup notes, architecture contracts, validation checklist
+tests/                        no-runtime-data smoke, planner, intelligence, learning tests
+tools/                        navigation log dataset builder and GRU training CLI
 requirements/                 Python/runtime dependency lists
 ```
 
@@ -68,30 +76,31 @@ nav_msgs
 geometry_msgs
 std_msgs
 tf2_ros
+robot_localization
 launch
 launch_ros
 rosbag2
 ```
 
-The YOLO backend requires `ultralytics`, `torch`, and `torchvision`. For headless smoke tests or Gazebo with segmentation disabled, those heavy dependencies are not imported.
+The YOLO backend requires `ultralytics`, `torch`, and `torchvision`. For headless smoke tests or Gazebo with segmentation disabled, those heavy dependencies are not imported. The navigation GRU is also optional at runtime: without `NAV_GRU_RISK_CHECKPOINT`, deterministic safety checks remain active and the learned risk model reports unavailable. For local GRU training, use a project venv such as `.venv` rather than system Python.
 
 ## Local Validation
 
 Run these before a ROS2 or hardware session:
 
 ```bash
-python3 -m compileall runtime/core mapping/global_map motion/vo segmentation ros/semantic_spatial_mapping_ros/semantic_spatial_mapping_ros tests
-python3 -m unittest tests.test_runtime_core tests.test_ros_converters tests.test_vo_rgbd
+python3 -m compileall runtime/core planning mapping/global_map motion/vo segmentation ros/semantic_spatial_mapping_ros/semantic_spatial_mapping_ros tools tests
+python3 -m pytest tests
 python3 -m runtime.core.runtime_validation
-python3 ros/semantic_spatial_mapping_ros/setup.py --name
+colcon build --packages-select semantic_spatial_mapping_ros
 ```
 
 Expected:
 
 ```text
-OK
+37 passed, 1 skipped
 runtime validation passed
-semantic_spatial_mapping_ros
+1 package finished
 ```
 
 ## ROS2 Build And Launch
@@ -116,12 +125,24 @@ Run Gazebo profile for the perception/VSLAM ROS node:
 ros2 launch semantic_spatial_mapping_ros gazebo_runtime.launch.py
 ```
 
+Run Gazebo with odometry+IMU EKF fusion enabled:
+
+```bash
+ros2 launch semantic_spatial_mapping_ros gazebo_fused_runtime.launch.py
+```
+
 For the full Gazebo trial, including the factory world, `factory_bot`, ROS-Gazebo bridge, reactive navigator, and screen-recording command sequence, use [`gazebo_demo/README.md`](gazebo_demo/README.md).
 
 Run embedded OAK-D style profile:
 
 ```bash
 ros2 launch semantic_spatial_mapping_ros embedded_runtime.launch.py
+```
+
+Run embedded profile with odometry+IMU EKF fusion enabled:
+
+```bash
+ros2 launch semantic_spatial_mapping_ros embedded_fused_runtime.launch.py
 ```
 
 Override config:
@@ -135,13 +156,38 @@ Default configs:
 
 ```text
 ros/semantic_spatial_mapping_ros/config/gazebo.yaml
+ros/semantic_spatial_mapping_ros/config/gazebo_fused.yaml
+ros/semantic_spatial_mapping_ros/config/gazebo_odom_imu_ekf.yaml
 ros/semantic_spatial_mapping_ros/config/embedded_oakd.yaml
+ros/semantic_spatial_mapping_ros/config/embedded_oakd_fused.yaml
+ros/semantic_spatial_mapping_ros/config/embedded_odom_imu_ekf.yaml
 ```
 
 Runtime checklist:
 
 ```text
 notes/runtime_validation_checklist.md
+```
+
+Navigation learning workflow:
+
+```text
+tools/build_navigation_learning_dataset.py
+tools/train_navigation_risk_gru.py
+```
+
+Navigator CSV logs can be converted into GRU sequence datasets and trained into a checkpoint loaded with `NAV_GRU_RISK_CHECKPOINT`. The learned model predicts navigation risk; deterministic safety checks remain the final authority. With the local ML venv, the GRU-specific test path is:
+
+```bash
+env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_navigation_learning.py
+```
+
+Expected: `5 passed`.
+
+Architecture contracts and acceptance criteria:
+
+```text
+notes/architecture_contracts.md
 ```
 
 ## Runtime Logging
@@ -158,7 +204,7 @@ Embedded profiles also try to record a rosbag:
 runtime_logs/<timestamp>_<profile>_<pid>/rosbag/
 ```
 
-`runtime_logs/` is intentionally not in `.gitignore`. These reports are meant to preserve field-run evidence when debugging sensor topics, encodings, CameraInfo, TF, calibration, perception, mapping, or VSLAM behavior.
+`runtime_logs/` is ignored by git to keep the repository clean. These reports are still the primary field-run evidence when debugging sensor topics, encodings, CameraInfo, TF, calibration, perception, mapping, VSLAM behavior, navigation intelligence, or learned-risk training data.
 
 Runtime logging config:
 
@@ -180,9 +226,11 @@ Default input topics are configurable in YAML:
 ```text
 RGB image:        /camera/color/image_raw or /vctr/rgb_raw
 Depth image:      /camera/depth/image_raw or /vctr/depth_raw
+IMU:              /imu/data
 RGB CameraInfo:   /camera/color/camera_info or /vctr/rgb/camera_info
 Depth CameraInfo: /camera/depth/camera_info or /vctr/depth/camera_info
-Pose source:      /odom, /pose, TF, internal VSLAM, or identity fallback
+Pose source:      /odom, /odometry/filtered, /pose, TF, internal VSLAM, or identity fallback
+Fallback odom:    /odom when /odometry/filtered is unavailable or stale
 ```
 
 Default output topics:
@@ -349,10 +397,10 @@ Tests:
 The following local checks passed:
 
 ```bash
-python3 -m compileall runtime/core mapping/global_map motion/vo segmentation ros/semantic_spatial_mapping_ros/semantic_spatial_mapping_ros tests
-python3 -m unittest tests.test_runtime_core tests.test_ros_converters tests.test_vo_rgbd
+python3 -m compileall runtime/core planning mapping/global_map motion/vo segmentation ros/semantic_spatial_mapping_ros/semantic_spatial_mapping_ros tools tests
+python3 -m pytest tests
 python3 -m runtime.core.runtime_validation
-python3 ros/semantic_spatial_mapping_ros/setup.py --name
+colcon build --packages-select semantic_spatial_mapping_ros
 git check-ignore -v runtime_logs || true
 ```
 

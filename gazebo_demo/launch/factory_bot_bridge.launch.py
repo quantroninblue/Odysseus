@@ -40,6 +40,13 @@ BRIDGES = {
         "gz_type_name": "gz.msgs.Odometry",
         "direction": "GZ_TO_ROS",
     },
+    "imu": {
+        "ros_topic_name": "/imu/data",
+        "gz_topic_name": "/model/factory_bot/imu",
+        "ros_type_name": "sensor_msgs/msg/Imu",
+        "gz_type_name": "gz.msgs.IMU",
+        "direction": "GZ_TO_ROS",
+    },
     "cmd_vel": {
         "ros_topic_name": "/factory_bot/cmd_vel",
         "gz_topic_name": "/model/factory_bot/cmd_vel",

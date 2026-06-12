@@ -1,4 +1,4 @@
-profile: embedded_oakd
+profile: embedded_oakd_fused
 
 topics:
   rgb: /vctr/rgb_raw
@@ -6,7 +6,7 @@ topics:
   rgb_camera_info: /vctr/rgb/camera_info
   depth_camera_info: /vctr/depth/camera_info
   imu: /imu/data
-  odom: /odom
+  odom: /odometry/filtered
   fallback_odom: /odom
   pose: /pose
   semantic_points: /semantic_spatial/points
@@ -38,7 +38,7 @@ depth:
   stride: 4
 
 pose:
-  source: tf
+  source: odom
   input_pose: world_base
   max_age_sec: 0.25
   max_jump_m: 5.0
@@ -90,4 +90,5 @@ logging:
   directory: runtime_logs
   frame_log_period: 1
   record_embedded_rosbag: true
-  rosbag_topics: []
+  rosbag_topics:
+    - /odom

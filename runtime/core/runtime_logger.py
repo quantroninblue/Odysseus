@@ -345,6 +345,8 @@ def default_rosbag_topics(config: RuntimeConfig) -> list[str]:
         config.topics.depth,
         config.topics.rgb_camera_info,
         config.topics.depth_camera_info,
+        config.topics.imu,
+        config.topics.fallback_odom,
         config.topics.semantic_points,
         config.topics.semantic_objects,
         config.topics.map_points,
@@ -352,7 +354,7 @@ def default_rosbag_topics(config: RuntimeConfig) -> list[str]:
         config.topics.vo_odom,
     ]
     source = (config.pose.source or "").lower()
-    if source in {"odom", "odometry"}:
+    if source in {"odom", "odometry", "internal_vslam", "vslam", "vo"}:
         topics.append(config.topics.odom)
     elif source in {"pose", "pose_stamped", "posestamped"}:
         topics.append(config.topics.pose)

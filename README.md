@@ -2,7 +2,7 @@
 
 Odysseus is an embodied navigation AI for obstacle-laden factory environments. It uses RGB-D perception, semantic mapping, VSLAM/odometry, persistent occupancy mapping, A* route search, local trajectory rollout, causal attribution, and cross-run world memory to reach a designated destination while learning from failed paths.
 
-The repository name is still `semantic_spatial_mapping`, but the current product layer is **Odysseus**. Perception, mapping, VSLAM, and planning are the sensorimotor substrate. Odysseus owns the continuing navigation loop: it observes the world, chooses from collision-checked candidate motions, sees what actually happened, updates memory, marks bad regions, retraces or explores when needed, and records causal training samples.
+Perception, mapping, VSLAM, and planning are the sensorimotor substrate. Odysseus owns the continuing navigation loop: it observes the world, chooses from collision-checked candidate motions, sees what actually happened, updates memory, marks bad regions, retraces or explores when needed, and records causal training samples.
 
 ## What Odysseus Does
 

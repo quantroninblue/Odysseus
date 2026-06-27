@@ -22,7 +22,7 @@ Terminal 1: open Gazebo Sim with the factory world.
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 gz sim -r gazebo_demo/factory_obstacle_demo.world
 ```
 
@@ -32,7 +32,7 @@ Terminal 2: bridge Gazebo camera, depth, IMU, odom, and command topics into ROS.
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 ros2 launch gazebo_demo/launch/factory_bot_bridge.launch.py
 ```
 
@@ -40,7 +40,7 @@ Terminal 3: run odometry+IMU EKF fusion plus the perception/VSLAM stack against 
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 source install/setup.bash
 ros2 launch semantic_spatial_mapping_ros gazebo_fused_runtime.launch.py
 ```
@@ -51,7 +51,7 @@ If the ROS workspace has not been built yet:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 colcon build
 source install/setup.bash
 ```
@@ -60,7 +60,7 @@ Terminal 4: run Odysseus navigation with deterministic safety authority and auto
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 source install/setup.bash
 python3 gazebo_demo/scripts/run_odysseus_auto.py
 ```
@@ -92,7 +92,7 @@ contract in the fused Gazebo profile.
 Optional learned risk model workflow:
 
 ```bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 python3 tools/build_navigation_learning_dataset.py runtime_logs/navigator_commands_*.csv -o artifacts/navigation_risk_dataset.npz --window-size 16
 PYTHONPATH=. .venv/bin/python tools/train_navigation_risk_gru.py artifacts/navigation_risk_dataset.npz -o artifacts/nav_gru_risk.pt --epochs 30
 NAV_GRU_RISK_CHECKPOINT=artifacts/nav_gru_risk.pt python3 gazebo_demo/scripts/factory_bot_stack_navigator.py
@@ -130,7 +130,7 @@ Command path:
 At startup the auto-runner should print the navigator interpreter. On this workstation it should prefer the venv:
 
 ```text
-[odysseus-auto] navigator python: /home/neel-mukherjee/Desktop/semantic_spatial_mapping/.venv/bin/python
+[odysseus-auto] navigator python: /home/neel-mukherjee/Desktop/odysseus/.venv/bin/python
 ```
 
 During navigation, useful fields are:

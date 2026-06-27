@@ -2,7 +2,7 @@
 
 Odysseus is an embodied navigation AI for obstacle-laden factory environments. It uses RGB-D perception, semantic mapping, VSLAM/odometry, persistent occupancy mapping, A* route search, local trajectory rollout, causal attribution, and cross-run world memory to reach a designated destination while learning from failed paths.
 
-Perception, mapping, VSLAM, and planning are the sensorimotor substrate. Odysseus owns the continuing navigation loop: it observes the world, chooses from collision-checked candidate motions, sees what actually happened, updates memory, marks bad regions, retraces or explores when needed, and records causal training samples.
+Perception, mapping, VSLAM, and planning are the sensorimotor substrate. Odysseus is the product layer that owns the continuing navigation loop: it observes the world, chooses from collision-checked candidate motions, sees what actually happened, updates memory, marks bad regions, retraces or explores when needed, and records causal training samples.
 
 ## What Odysseus Does
 
@@ -51,7 +51,7 @@ tools/                        Odysseus, cognitive model, and legacy GRU training
 Recommended local setup on Ubuntu with ROS2 Jazzy:
 
 ```bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
@@ -72,11 +72,11 @@ colcon build --packages-select semantic_spatial_mapping_ros
 source install/setup.bash
 ```
 
-The historical `requirements/python_requirements.txt` is UTF-16 LE. Convert before using it:
+If using `requirements/python_requirements.txt`, convert it from UTF-16 LE before installing:
 
 ```bash
-iconv -f UTF-16LE -t UTF-8 requirements/python_requirements.txt > /tmp/ssm_python_requirements.txt
-pip install -r /tmp/ssm_python_requirements.txt
+iconv -f UTF-16LE -t UTF-8 requirements/python_requirements.txt > /tmp/odysseus_python_requirements.txt
+pip install -r /tmp/odysseus_python_requirements.txt
 ```
 
 ## Run Odysseus In Gazebo
@@ -87,7 +87,7 @@ Terminal 1:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 gz sim -r gazebo_demo/factory_obstacle_demo.world
 ```
 
@@ -95,7 +95,7 @@ Terminal 2:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 ros2 launch gazebo_demo/launch/factory_bot_bridge.launch.py
 ```
 
@@ -103,7 +103,7 @@ Terminal 3:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 colcon build --packages-select semantic_spatial_mapping_ros
 source install/setup.bash
 ros2 launch semantic_spatial_mapping_ros gazebo_fused_runtime.launch.py
@@ -113,7 +113,7 @@ Terminal 4:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+cd /home/neel-mukherjee/Desktop/odysseus
 source install/setup.bash
 python3 gazebo_demo/scripts/run_odysseus_auto.py
 ```
@@ -329,171 +329,19 @@ extrinsics:
 
 Replace identity extrinsics with measured robot calibration before trusting map geometry.
 
-## Current Capabilities
+## Current Stack
 
 | Area | Current state |
 | --- | --- |
-| RGB-D geometry | Vectorized point extraction, depth units, projection helpers |
-| Runtime core | Config-driven deployment runtime with diagnostics and degraded modes |
-| ROS2 package | Launch files, node, converters, sync, pose adapters, publishers |
-| Pose sources | Odometry, PoseStamped, TF, internal VSLAM, identity fallback |
-| Perception | Backend interface with disabled, mock, and YOLO providers |
-| Mask handling | Area, border-touch, depth-support, and max-mask filters |
-| Semantic map | Bounded point map plus object/entity map with IDs and observations |
-| VSLAM | RGB-D PnP path with depth landmarks and monocular fallback |
-| Logging | Per-run text reports; embedded rosbag recording attempt |
-| Tests | Core runtime, ROS converters, failure modes, RGB-D VO PnP |
+| Odysseus navigation | Owns rollout selection, advance/recover/retrace/explore mode switching, causal sample closure, and persistent world memory |
+| World memory | Stores no-go regions, successful corridors, action values, and cross-run behavior evidence in `artifacts/odysseus_world_memory.json` |
+| Causal attribution | PyTorch MLP predicts failure cause, progress, stuck/collision/safety risk, localization risk, stale-sensor risk, and severity |
+| Global planning | Builds a persistent world-frame occupancy costmap and runs A* to produce route waypoints |
+| Local planning | Generates collision-checked forward, turning, and reverse recovery rollouts from live depth geometry |
+| Safety authority | Deterministic navigation intelligence checks stale sensors, immediate obstacles, false progress, pose divergence, and recovery authority before `cmd_vel` |
+| Perception/VSLAM | Provides RGB-D geometry, semantic objects, bounded maps, odometry/VSLAM pose evidence, diagnostics, and ROS2 topic outputs |
+| Automation | `run_odysseus_auto.py` creates artifacts, loads checkpoints, runs navigation, and trains Odysseus after shutdown when samples exist |
+| Deployment | Local ROS2 Jazzy workflow plus Docker/Docker Compose baseline for reproducible installation |
+| Tests | Headless planner, Odysseus, runtime, safety, ROS converter, and validation checks documented above |
 
-## Known Gaps Before Calling It Finished
-
-- Needs `colcon build` and ROS launch validation in a sourced ROS2 workspace.
-- Needs Gazebo, rosbag, and embedded hardware runtime feedback.
-- Camera optical frame, base-to-camera, and depth-to-RGB extrinsics need real calibration checks.
-- QoS and sync behavior may need sensor-specific tuning.
-- Internal VSLAM still needs robust local BA, relocalization, loop validation, and pose graph correction.
-- Semantic object fusion is currently nearest-class/centroid based; it needs runtime evaluation.
-- Runtime performance needs profiling on embedded hardware.
-
-## 05.06.26 Integration Report
-
-### Starting Point
-
-Before the v2.0 integration pass, the repository already had modular research/reference components:
-
-- `geometry/` for RGB-D backprojection, transforms, point clouds, and OBB support.
-- `segmentation/` with a YOLOv8 segmentation reference.
-- `motion/vo/` with a monocular visual odometry frontend.
-- `mapping/global_map/` with world-frame point accumulation.
-- `runtime/python_reference/` with a Python reference semantic runtime.
-- `tracking/` with temporal filtering and state-estimation references.
-- `ingestion/` and replay utilities for dataset/rosbag-style data paths.
-
-At that stage, the repo was organized around modular perception and VO prototypes. The ROS deployment layer was not yet a working runtime package, pose-source selection was not generalized, world-map storage was append-oriented, RGB-D extraction used more prototype-style loops, and the VO backend pieces from the external VSLAM reference had not been integrated into this repo's `motion/vo` package.
-
-### Changes Added In v2.0
-
-Runtime core:
-
-- Added `runtime/core/` as the deployment-facing runtime layer.
-- Added structured runtime config loading and validation.
-- Added diagnostics, health state, degraded modes, pose providers, runtime output types, and lifecycle hooks.
-- Added runtime logger that writes `runtime_logs/<session>/runtime_report.txt` on every ROS2 run.
-- Added embedded-only rosbag recording attempt through `ros2 bag record`.
-
-ROS2 deployment:
-
-- Added `ros/semantic_spatial_mapping_ros/` package.
-- Added Gazebo and embedded OAK-D style YAML profiles.
-- Added launch files for both profiles.
-- Added `semantic_spatial_node`.
-- Added ROS image/CameraInfo conversion without requiring `cv_bridge`.
-- Added approximate RGB-D sync.
-- Added ROS pose adapters for Odometry, PoseStamped, TF, internal VSLAM, and identity fallback.
-- Added publishers for semantic points, semantic objects, map points, diagnostics, VO odometry, and optional overlay.
-- Added sensor-data QoS for camera streams.
-
-Geometry and mapping:
-
-- Vectorized point cloud generation and object point extraction.
-- Added configurable depth units.
-- Added depth-to-RGB point projection helpers.
-- Replaced append-only world map behavior with bounded voxel-downsampled storage.
-- Added semantic object map with IDs, labels, confidence, centroid, extent, covariance, observation count, and bounded fused points.
-
-Perception:
-
-- Added perception contracts: `InstanceMask`, `SemanticFrame`, and `ObjectGeometry`.
-- Added segmentation provider abstraction: disabled, mock, YOLO.
-- Preserved YOLO class IDs, labels, confidences, and boxes.
-- Added mask filtering by area, depth support, border contact, and max masks per frame.
-- Added point outlier filtering before map/object fusion.
-
-VSLAM and VO:
-
-- Integrated external VSLAM backend modules into `motion/vo/`.
-- Preserved the existing `VisualOdometry.update(...) -> PoseUpdate` API used by runtime code.
-- Added covisibility graph plumbing.
-- Added RGB-D scale handling.
-- Added RGB-D PnP tracking path using keyframe depth and current 2D features.
-- Added depth-initialized RGB-D landmarks when PnP succeeds.
-- Kept monocular essential-matrix tracking as fallback.
-- Added VO diagnostics for tracking method, depth support ratio, and reprojection error.
-- Made optional visualization imports lazy.
-
-Reliability and debugging:
-
-- Added config validation for topics, frames, depth ranges, pose source, pose contract, extrinsics, resource limits, and logging settings.
-- Added external pose staleness checks.
-- Added runtime pose guards for NaN/non-finite poses, huge translations, and sudden jumps.
-- Added CameraInfo staleness filtering.
-- Added resource caps for masks, per-frame points, and per-object points.
-- Added runtime validation checklist in `notes/runtime_validation_checklist.md`.
-
-Tests:
-
-- Added synthetic runtime validation.
-- Added unit tests for config validation, stale pose, missing depth, missing CameraInfo, empty segmentation, bad extrinsics, NaN pose, pose jumps, object fusion, point caps, runtime logging, and default rosbag topics.
-- Added ROS converter tests that run when ROS message packages are available.
-- Added RGB-D VO PnP test.
-
-### Verification Run
-
-The following local checks passed:
-
-```bash
-python3 -m compileall runtime/core planning mapping/global_map motion/vo segmentation ros/semantic_spatial_mapping_ros/semantic_spatial_mapping_ros tools tests
-python3 -m pytest tests
-python3 -m runtime.core.runtime_validation
-colcon build --packages-select semantic_spatial_mapping_ros
-git check-ignore -v runtime_logs || true
-```
-
-The unit test suite currently reports:
-
-```text
-20 tests OK
-```
-
-### Current Interpretation
-
-The v2.0 integration moved the repository from a modular perception/VO reference codebase into a first deployable architecture pass for a hardware/software-agnostic perception + VSLAM stack. The next milestone is runtime validation with Gazebo, rosbag replay, and embedded hardware so the stack can be hardened against real TF trees, topic QoS, depth encodings, CameraInfo timing, calibration, object fusion behavior, and VSLAM tracking quality.
-
-## Historical Snapshot: Earlier README Direction
-
-The earlier README described the repository as a modular semantic spatial mapping framework integrating:
-
-- RGB-D geometry
-- semantic segmentation
-- persistent object tracking
-- monocular visual odometry
-- world-frame spatial accumulation
-- semantic point cloud extraction
-
-The earlier pipeline was:
-
-```text
-RGB Frame
-Depth Frame
-    -> Segmentation
-    -> Semantic Masks
-    -> RGB-D Pointcloud Extraction
-    -> Visual Odometry
-    -> World-Frame Projection
-    -> Persistent Semantic Spatial Map
-```
-
-The earlier roadmap focused on:
-
-- static scene stability
-- rotation and translation consistency
-- semantic persistence
-- Open3D visualization
-- RGB-D metric scale grounding
-- persistent semantic entities
-- relocalization
-- local semantic mapping
-- pose graph optimization
-- loop closure
-- navigation/manipulation integration
-
-That direction remains the project direction. The current README records the deployment runtime, ROS2 integration, logging, testing, and object/VSLAM upgrades added on `05.06.26`.
+This README describes the current Odysseus stack. Older integration notes and previous roadmap material have been removed from the public README so the repository presents the product as it exists now.

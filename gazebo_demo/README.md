@@ -56,18 +56,32 @@ colcon build
 source install/setup.bash
 ```
 
-Terminal 4: run the rollout navigator with navigation intelligence.
+Terminal 4: run Odysseus navigation with deterministic safety authority and automatic learning.
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
 source install/setup.bash
-python3 gazebo_demo/scripts/factory_bot_stack_navigator.py
+python3 gazebo_demo/scripts/run_odysseus_auto.py
 ```
 
-The navigator logs live perception state, including depth sectors, rollout decision, navigation intelligence decision, mode, distance to goal, heading error, command velocity, pose source, target marker visibility, stack diagnostics, and semantic object counts. It also writes every published command to `runtime_logs/navigator_commands_<timestamp>_<pid>.csv` with mode, pose, depth sectors, local plan, rollout reason, navigation intelligence state/action/reason, semantic hazard snapshot, and `cmd_v/cmd_w`.
+`run_odysseus_auto.py` creates the Odysseus sample directory, loads/saves
+persistent world memory, loads an existing causal-attributor checkpoint when
+available, runs the navigator, and trains a refreshed checkpoint after you stop
+Terminal 4 if enough samples exist. It automatically uses `.venv/bin/python`
+when that interpreter has both `rclpy` and `torch`, so live Odysseus can load the
+MLP attributor instead of only training after shutdown. Use `--no-train` when
+you want navigation only.
 
-The navigator builds an inflated local obstacle map from live depth and uses a short-horizon trajectory rollout planner for normal motion. A navigation intelligence layer then cross-checks proposed commands against odometry, independent VSLAM, and depth-scene change before publishing `cmd_vel`. It keeps emergency recovery checks for boxed-in, stale, false-odom blocked, and badly off-course cases.
+The navigator logs live perception state, including depth sectors, Odysseus mode/reason/trace, rollout evidence, navigation intelligence decision, distance to goal, heading error, command velocity, pose source, target marker visibility, stack diagnostics, and semantic object counts. It also writes every published command to `runtime_logs/navigator_commands_<timestamp>_<pid>.csv` with mode, pose, depth sectors, local plan, rollout reason, Odysseus trace/candidate/sample, navigation intelligence state/action/reason, semantic hazard snapshot, and `cmd_v/cmd_w`.
+
+The navigator transforms live depth obstacles into a persistent world-frame costmap, inflates them by the robot safety radius, and runs A* from the current control pose to the target. A lookahead waypoint from that global route guides short-horizon trajectory rollout generation on the live local depth costmap. Odysseus owns the continuing navigation decision loop over those collision-checked candidates: it observes the previous choice's outcome, detects surprise or poor progress, and can switch between advance, recover, retrace, and explore behavior. Navigation intelligence then cross-checks Odysseus commands against odometry, independent VSLAM, and depth-scene change before publishing `cmd_vel`.
+
+The global map starts empty; no factory obstacle coordinates are preloaded. Repeated depth observations add occupancy evidence, free-space rays clear stale evidence, and old obstacle evidence decays. Terminal 4 reports `global_route=route_ready` and the active `global_waypoint`, and the command CSV includes the global route status, reason, length, and waypoint.
+
+The auto-runner writes owned causal episode samples to `artifacts/odysseus_samples`, keeps persistent world memory in `artifacts/odysseus_world_memory.json`, and updates `artifacts/odysseus_attributor.pt` after a run. Keep the memory file between runs to let Odysseus avoid previously failed routes in the same world. Each sample ties the state and candidate set to what actually happened on the next tick: progress, stuck/safety events, localization/stale-sensor signals, inferred failure cause, and severity.
+
+The navigator also runs the Neural Cognitive Core foundation as a supporting world-model data path. It builds a versioned observation from RGB-D, pose, maps, route, semantics, and command history; updates memory; and logs a deterministic teacher decision. Set `COGNITIVE_DATASET_DIR=artifacts/cognitive_samples` to record owned temporal NPZ samples for cognitive-world-model training.
 
 The navigator subscribes to `/semantic_spatial/visual_odometry` for stack
 visibility. It uses `/odometry/filtered` from the odom+IMU EKF as the control pose
@@ -113,14 +127,33 @@ Command path:
 
 ## What To Watch In Terminal 4
 
-The earlier failure mode was: `cmd_v` stayed positive, `/odometry/filtered` claimed progress, but the front/lower-front depth scene stayed nearly unchanged while the robot pushed into poles. In the `Vector_NN` path, the expected safety signature near that failure is:
+At startup the auto-runner should print the navigator interpreter. On this workstation it should prefer the venv:
 
 ```text
-nav_intel=BLOCKED/REVERSE:odom reports forward progress while depth scene is static near an obstacle
-mode=nav_intel_reverse
+[odysseus-auto] navigator python: /home/neel-mukherjee/Desktop/semantic_spatial_mapping/.venv/bin/python
 ```
 
-If `learned_risk` is `UNAVAILABLE`, the GRU checkpoint is not loaded and deterministic safety is still active. If a checkpoint is loaded, `learned_risk=<score>/CAUTION` or `HIGH_RISK` may slow or stop earlier, but deterministic safety remains the hard guardrail.
+During navigation, useful fields are:
+
+```text
+odysseus=<mode>:<reason>
+rollout=<mode>:<reason>
+global_route=<status>:<reason>
+nav_intel=<motion_state>/<safety_action>:<reason>
+cmd_v=<linear> cmd_w=<angular>
+```
+
+Expected Odysseus behavior in clutter is not a single perfect line. You should see it advance, recover, retrace, and explore as it learns local structure. If it hits a close obstacle, reverse recovery candidates are now available and navigation intelligence allows recovery reverse/turn commands even inside the immediate stop zone.
+
+Bad signs to investigate:
+
+```text
+rollout=fallback:'unknown Odysseus trace: ...'
+```
+
+This was fixed in the current version; if it reappears, Odysseus trace closure regressed. Repeated `nav_intel=BLOCKED/STOP` with no `odysseus_recover` or reverse motion means the robot is physically boxed in or the local costmap is rejecting all escape candidates.
+
+If `learned_risk` is `UNAVAILABLE`, that only refers to the legacy GRU risk model. Odysseus uses its own causal attributor via `artifacts/odysseus_attributor.pt` when available.
 
 ## Manual Checks
 

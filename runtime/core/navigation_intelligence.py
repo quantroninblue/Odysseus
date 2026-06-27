@@ -155,6 +155,15 @@ class NavigationIntelligence:
 
         if sample.depth_signature is not None and sample.depth_signature.nearest_front_m < self.immediate_stop_m:
             self._reset_forward_watch()
+            if sample.in_recovery and sample.proposed_command.linear_x <= 0.01:
+                return self._remember(
+                    NavigationDecision(
+                        "OK",
+                        "ALLOW",
+                        0.82,
+                        f"recovery escape command has authority near immediate obstacle {sample.depth_signature.nearest_front_m:.2f}m",
+                    )
+                )
             return self._remember(
                 self._override(
                     sample,

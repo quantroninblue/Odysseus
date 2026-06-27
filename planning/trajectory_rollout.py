@@ -48,7 +48,7 @@ class TrajectoryRolloutPlanner:
         detour_hint: float = 1.0,
         frame_id: str = "base_link",
     ) -> RolloutResult:
-        linear_options = [0.0, 0.08, 0.16, 0.24, self.max_linear_mps]
+        linear_options = [-0.16, -0.08, 0.0, 0.08, 0.16, 0.24, self.max_linear_mps]
         angular_options = [-0.85, -0.55, -0.30, -0.12, 0.0, 0.12, 0.30, 0.55, 0.85]
         evaluations: list[CandidateEvaluation] = []
         goal = float(np.clip(goal_heading_error, -1.2, 1.2))
@@ -65,7 +65,7 @@ class TrajectoryRolloutPlanner:
         if accepted:
             best = min(accepted, key=lambda item: item.score)
             reason = f"selected score={best.score:.3f} clearance={best.min_clearance_m:.2f}"
-            mode = "rollout_drive" if best.linear_x > 0.02 else "rollout_turn"
+            mode = "rollout_reverse" if best.linear_x < -0.02 else ("rollout_drive" if best.linear_x > 0.02 else "rollout_turn")
             command = PlannerCommand(
                 stamp=RuntimeStamp(now_sec, frame_id, "trajectory_rollout"),
                 linear_x=best.linear_x,
@@ -119,7 +119,8 @@ class TrajectoryRolloutPlanner:
         turn_cost = 0.10 * abs(angular)
         detour_cost = 0.04 * abs(angular - 0.35 * detour_hint)
         blocked_ahead = corridor_clearance < 2.2
-        stop_cost = 0.45 if linear <= 0.01 and min_clearance > 0.9 else 0.0
+        reverse_escape_reward = 0.45 * max(-linear, 0.0) if corridor_clearance < 1.2 else 0.0
+        stop_cost = 0.45 if -0.02 <= linear <= 0.01 and min_clearance > 0.9 else 0.0
         if linear <= 0.01 and blocked_ahead:
             stop_cost += 1.4
             if abs(angular) < 0.10:
@@ -139,6 +140,7 @@ class TrajectoryRolloutPlanner:
             + straight_hazard_cost
             - active_bypass_reward
             - speed_reward
+            - reverse_escape_reward
         )
         return CandidateEvaluation(linear, angular, True, float(score), "ok", min_clearance)
 

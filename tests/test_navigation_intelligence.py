@@ -118,6 +118,24 @@ class NavigationIntelligenceTests(unittest.TestCase):
         self.assertEqual(decision.safety_action, "STOP")
         self.assertEqual(decision.override_command.linear_x, 0.0)
 
+
+    def test_immediate_stop_allows_recovery_escape_command(self):
+        intelligence = NavigationIntelligence()
+        decision = intelligence.update(
+            NavigationIntelligenceInput(
+                now_sec=4.0,
+                proposed_command=command(4.0, linear=-0.12, angular=0.55),
+                control_pose=pose(4.0, 1.0),
+                depth_signature=scene(4.0, front=0.55, lower_front=0.55),
+                depth_age_sec=0.02,
+                control_pose_age_sec=0.02,
+                in_recovery=True,
+            )
+        )
+
+        self.assertEqual(decision.safety_action, "ALLOW")
+        self.assertIn("recovery escape", decision.reason)
+
     def test_pose_divergence_requests_relocalization(self):
         intelligence = NavigationIntelligence()
 

@@ -1,0 +1,20 @@
+services:
+  odysseus:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: odysseus-navigation:latest
+    container_name: odysseus-navigation
+    network_mode: host
+    ipc: host
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+    volumes:
+      - .:/opt/odysseus
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    working_dir: /opt/odysseus
+    command: bash
+    stdin_open: true
+    tty: true

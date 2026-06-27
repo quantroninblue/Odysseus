@@ -1,193 +1,237 @@
-# semantic_spatial_mapping
+# Odysseus Navigation AI
 
-Start here for setup and architecture. The committed handover state for the
-`Vector_NN` work is summarized in this README, `gazebo_demo/README.md`, and
-`notes/architecture_contracts.md`.
+Odysseus is an embodied navigation AI for obstacle-laden factory environments. It uses RGB-D perception, semantic mapping, VSLAM/odometry, persistent occupancy mapping, A* route search, local trajectory rollout, causal attribution, and cross-run world memory to reach a designated destination while learning from failed paths.
 
-## Current Purpose
+The repository name is still `semantic_spatial_mapping`, but the current product layer is **Odysseus**. Perception, mapping, VSLAM, and planning are the sensorimotor substrate. Odysseus owns the continuing navigation loop: it observes the world, chooses from collision-checked candidate motions, sees what actually happened, updates memory, marks bad regions, retraces or explores when needed, and records causal training samples.
 
-`semantic_spatial_mapping` is a robotics perception and VSLAM integration stack. It combines RGB-D geometry, semantic segmentation, semantic object mapping, configurable pose sources, and visual odometry behind a ROS2 deployment runtime.
-
-The current target is a plug-and-play, hardware/software-agnostic perception + VSLAM stack that can run in:
-
-- Gazebo simulation trials. See `gazebo_demo/README.md` for the factory world, bridge, perception/VSLAM demo, and exact terminal commands.
-- embedded robot hardware
-- ROS2 bag/replay workflows
-- headless validation runs
-
-## Current Runtime Shape
+## What Odysseus Does
 
 ```text
-RGB image + depth image + CameraInfo
-    -> segmentation backend
-    -> mask quality filtering
-    -> RGB-D semantic point extraction
-    -> semantic object/entity fusion
-    -> pose source or internal VSLAM
-    -> world-frame map update
+RGB-D + CameraInfo + odometry/IMU/VSLAM
+    -> semantic RGB-D mapping and object memory
+    -> persistent world-frame occupancy costmap
+    -> A* global route and lookahead waypoint
     -> inflated local depth costmap
-    -> collision-checked trajectory rollout planner
-    -> engineered navigation memory features
-    -> optional GRU learned risk predictor
-    -> navigation intelligence / safety authority
-    -> ROS diagnostics, clouds, objects, odometry, runtime report
+    -> collision-checked rollout candidates
+    -> Odysseus embodied navigation loop
+       (advance / recover / retrace / explore)
+    -> causal outcome closure + persistent world memory
+    -> optional MLP causal attributor checkpoint
+    -> navigation intelligence hard safety authority
+    -> cmd_vel + logs + owned training samples
 ```
+
+Odysseus currently learns in three ways:
+
+- Online world memory: failed cells become no-go regions, successful cells become corridor hints, and behavior values are updated every tick.
+- Causal samples: each decision is closed with observed progress, stuck/safety events, localization/stale-sensor signals, inferred failure cause, and severity.
+- Causal MLP: `runtime/core/odysseus/attribution.py` trains a PyTorch MLP that predicts failure cause, progress, stuck/collision/safety risk, localization risk, stale-sensor risk, and severity. The auto-runner loads the latest checkpoint when present.
+
+Hard safety is still deterministic. Odysseus may make policy mistakes so it can learn, but navigation intelligence can still stop, reverse, recover, or request relocalization before `cmd_vel` is published.
 
 ## Repository Layout
 
 ```text
-geometry/                    RGB-D geometry, camera models, transforms, point clouds
-mapping/global_map/           bounded world map and semantic object map
-motion/vo/                    visual odometry frontend and VSLAM backend scaffolding
-runtime/core/                 deployment runtime, contracts, diagnostics, intelligence, learning
+runtime/core/odysseus/        Odysseus contracts, world memory, causal MLP, navigator
+planning/                     global costmap, A*, local costmap, trajectory rollout
+runtime/core/cognition/       neural world-model foundation and teacher data path
+runtime/core/                 runtime contracts, diagnostics, safety authority, learning
 ros/semantic_spatial_mapping_ros/
                               ROS2 package, launch files, node, publishers, converters
-segmentation/                 YOLO reference segmentation backend
-tracking/                     temporal filtering and tracking references
-notes/                        setup notes, architecture contracts, validation checklist
-tests/                        no-runtime-data smoke, planner, intelligence, learning tests
-tools/                        navigation log dataset builder and GRU training CLI
-requirements/                 Python/runtime dependency lists
+motion/vo/                    visual odometry and VSLAM scaffolding
+mapping/global_map/           bounded world map and semantic object map
+geometry/                     RGB-D geometry, camera models, transforms, point clouds
+gazebo_demo/                  factory world, bridge launch, Odysseus auto-runner
+tests/                        headless planner, Odysseus, runtime, safety, ROS converter tests
+tools/                        Odysseus, cognitive model, and legacy GRU training CLIs
 ```
 
-## Install Dependencies
+## Install
 
-Create and activate a Python environment:
+Recommended local setup on Ubuntu with ROS2 Jazzy:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+python3 -m venv .venv
+source .venv/bin/activate
 python3 -m pip install --upgrade pip
+python3 -m pip install numpy pytest torch
 ```
 
-`requirements/python_requirements.txt` is currently UTF-16 LE. Convert it to a temporary UTF-8 requirements file before installing:
+Install/source ROS2 Jazzy with at least:
+
+```text
+rclpy sensor_msgs nav_msgs geometry_msgs std_msgs tf2_ros robot_localization launch launch_ros rosbag2
+```
+
+Build the ROS package from the repo root:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select semantic_spatial_mapping_ros
+source install/setup.bash
+```
+
+The historical `requirements/python_requirements.txt` is UTF-16 LE. Convert before using it:
 
 ```bash
 iconv -f UTF-16LE -t UTF-8 requirements/python_requirements.txt > /tmp/ssm_python_requirements.txt
 pip install -r /tmp/ssm_python_requirements.txt
 ```
 
-For ROS2 runtime usage, install/source a ROS2 distribution with at least:
+## Run Odysseus In Gazebo
 
-```text
-rclpy
-sensor_msgs
-nav_msgs
-geometry_msgs
-std_msgs
-tf2_ros
-robot_localization
-launch
-launch_ros
-rosbag2
-```
+Use four terminals. Terminal 4 is automated: it creates sample/memory directories, loads a causal checkpoint if present, runs Odysseus, and trains a refreshed checkpoint after shutdown when enough samples exist.
 
-The YOLO backend requires `ultralytics`, `torch`, and `torchvision`. For headless smoke tests or Gazebo with segmentation disabled, those heavy dependencies are not imported. The navigation GRU is also optional at runtime: without `NAV_GRU_RISK_CHECKPOINT`, deterministic safety checks remain active and the learned risk model reports unavailable. For local GRU training, use a project venv such as `.venv` rather than system Python.
-
-## Local Validation
-
-Run these before a ROS2 or hardware session:
+Terminal 1:
 
 ```bash
-python3 -m compileall runtime/core planning mapping/global_map motion/vo segmentation ros/semantic_spatial_mapping_ros/semantic_spatial_mapping_ros tools tests
-python3 -m pytest tests
-python3 -m runtime.core.runtime_validation
-colcon build --packages-select semantic_spatial_mapping_ros
+source /opt/ros/jazzy/setup.bash
+cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+gz sim -r gazebo_demo/factory_obstacle_demo.world
 ```
 
-Expected:
-
-```text
-37 passed, 1 skipped
-runtime validation passed
-1 package finished
-```
-
-## ROS2 Build And Launch
-
-From a ROS2 workspace, place or symlink the package so the ROS package path is available to `colcon`. One workable layout is:
-
-```text
-<workspace>/src/semantic_spatial_mapping/ros/semantic_spatial_mapping_ros
-```
-
-Build:
+Terminal 2:
 
 ```bash
-cd <workspace>
+source /opt/ros/jazzy/setup.bash
+cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+ros2 launch gazebo_demo/launch/factory_bot_bridge.launch.py
+```
+
+Terminal 3:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
 colcon build --packages-select semantic_spatial_mapping_ros
 source install/setup.bash
-```
-
-Run Gazebo profile for the perception/VSLAM ROS node:
-
-```bash
-ros2 launch semantic_spatial_mapping_ros gazebo_runtime.launch.py
-```
-
-Run Gazebo with odometry+IMU EKF fusion enabled:
-
-```bash
 ros2 launch semantic_spatial_mapping_ros gazebo_fused_runtime.launch.py
 ```
 
-For the full Gazebo trial, including the factory world, `factory_bot`, ROS-Gazebo bridge, reactive navigator, and screen-recording command sequence, use [`gazebo_demo/README.md`](gazebo_demo/README.md).
-
-Run embedded OAK-D style profile:
+Terminal 4:
 
 ```bash
-ros2 launch semantic_spatial_mapping_ros embedded_runtime.launch.py
+source /opt/ros/jazzy/setup.bash
+cd /home/neel-mukherjee/Desktop/semantic_spatial_mapping
+source install/setup.bash
+python3 gazebo_demo/scripts/run_odysseus_auto.py
 ```
 
-Run embedded profile with odometry+IMU EKF fusion enabled:
+Useful Terminal 4 options:
 
 ```bash
+python3 gazebo_demo/scripts/run_odysseus_auto.py --no-train
+python3 gazebo_demo/scripts/run_odysseus_auto.py --epochs 10 --min-samples 8
+```
+
+Default Odysseus artifacts:
+
+```text
+artifacts/odysseus_samples/              owned causal samples
+artifacts/odysseus_world_memory.json     persistent no-go/success/action memory
+artifacts/odysseus_attributor.pt         causal MLP checkpoint
+runtime_logs/navigator_commands_*.csv    command and decision audit log
+```
+
+Run the same world again without deleting `artifacts/odysseus_world_memory.json` to let Odysseus start with prior no-go regions and behavior memory.
+
+## Test
+
+Headless validation:
+
+```bash
+python3 -m compileall planning runtime/core mapping/global_map motion/vo segmentation ros/semantic_spatial_mapping_ros/semantic_spatial_mapping_ros tools tests
+python3 -m pytest tests -q
+python3 -m runtime.core.runtime_validation
+```
+
+ML-specific Odysseus validation with the local venv:
+
+```bash
+env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_odysseus.py -q
+```
+
+Expected current result:
+
+```text
+48 passed, 3 skipped
+7 passed in .venv Odysseus tests
+runtime validation passed
+```
+
+ROS build validation:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select semantic_spatial_mapping_ros
+```
+
+## Container Deployment
+
+Build the container:
+
+```bash
+docker build -t odysseus-navigation:latest .
+```
+
+Start an interactive container with host ROS/Gazebo networking:
+
+```bash
+docker compose run --rm odysseus
+```
+
+Inside the container:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source /opt/odysseus_ws/install/setup.bash
+cd /opt/odysseus
+python3 -m pytest tests -q
+```
+
+For GUI Gazebo from Docker, allow X11 access on the host first if needed:
+
+```bash
+xhost +local:docker
+```
+
+The container is intended as a reproducible ROS2/Odysseus deployment environment. Generated logs, datasets, checkpoints, and local memory stay out of git through `.gitignore` and `.dockerignore`.
+
+## Embedded Deployment Direction
+
+For embedded robots, Odysseus should run with the same contracts and different sensor topics/config:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
 ros2 launch semantic_spatial_mapping_ros embedded_fused_runtime.launch.py
+python3 gazebo_demo/scripts/run_odysseus_auto.py --no-train
 ```
 
-Override config:
+Before real factory deployment, update camera extrinsics, validate odometry/IMU/VSLAM frame contracts, tune QoS/sync, and run with conservative safety thresholds. Real-world training artifacts should remain in `artifacts/` or an external artifact store, not in git.
 
-```bash
-ros2 launch semantic_spatial_mapping_ros gazebo_runtime.launch.py \
-  config_path:=/absolute/path/to/runtime.yaml
-```
+## Architecture Notes
 
-Default configs:
+Core Odysseus modules:
 
-```text
-ros/semantic_spatial_mapping_ros/config/gazebo.yaml
-ros/semantic_spatial_mapping_ros/config/gazebo_fused.yaml
-ros/semantic_spatial_mapping_ros/config/gazebo_odom_imu_ekf.yaml
-ros/semantic_spatial_mapping_ros/config/embedded_oakd.yaml
-ros/semantic_spatial_mapping_ros/config/embedded_oakd_fused.yaml
-ros/semantic_spatial_mapping_ros/config/embedded_odom_imu_ekf.yaml
-```
+- `runtime/core/odysseus/contracts.py`: schema, rollout records, causal labels, trace and sample persistence.
+- `runtime/core/odysseus/world_memory.py`: persistent no-go cells, successful corridors, online behavior values.
+- `runtime/core/odysseus/navigation.py`: continuing navigation loop and mode switching.
+- `runtime/core/odysseus/attribution.py`: PyTorch causal MLP and checkpoint handling.
+- `runtime/core/odysseus/shadow.py`: trace closure and owned sample writing.
+- `gazebo_demo/scripts/run_odysseus_auto.py`: automatic run/train wrapper.
 
-Runtime checklist:
+Supporting learning paths:
 
-```text
-notes/runtime_validation_checklist.md
-```
+- `runtime/core/cognition/`: neural world-model foundation and deterministic teacher data path.
+- `runtime/core/navigation_learning.py`: legacy optional GRU risk predictor from engineered CSV sequences.
 
-Navigation learning workflow:
-
-```text
-tools/build_navigation_learning_dataset.py
-tools/train_navigation_risk_gru.py
-```
-
-Navigator CSV logs can be converted into GRU sequence datasets and trained into a checkpoint loaded with `NAV_GRU_RISK_CHECKPOINT`. The learned model predicts navigation risk; deterministic safety checks remain the final authority. With the local ML venv, the GRU-specific test path is:
-
-```bash
-env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/test_navigation_learning.py
-```
-
-Expected: `5 passed`.
-
-Architecture contracts and acceptance criteria:
+Architecture contracts and acceptance criteria live in:
 
 ```text
 notes/architecture_contracts.md
+notes/runtime_validation_checklist.md
 ```
 
 ## Runtime Logging

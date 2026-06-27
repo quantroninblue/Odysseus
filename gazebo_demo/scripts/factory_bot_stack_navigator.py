@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reactive perception/VSLAM demo navigator for factory_bot.
+"""Global/local perception and VSLAM demo navigator for factory_bot.
 
 Inputs:
 - /camera/depth/image_raw for obstacle sectors
@@ -10,8 +10,9 @@ Output:
 - ROS velocity commands on /factory_bot/cmd_vel, bridged to Gazebo Sim
 
 This is a live demo navigator: it knows the target coordinate, but it does not
-know obstacle locations ahead of time. It uses depth perception to slow down,
-turn away from obstacles, and speed up when the path is clear.
+know obstacle locations ahead of time. It accumulates depth obstacles in a
+world-frame costmap, follows an A* route, and uses local trajectory rollout and
+navigation intelligence to execute that route safely.
 """
 
 from __future__ import annotations
@@ -29,8 +30,17 @@ from rclpy.executors import ExternalShutdownException
 
 import numpy as np
 
+from planning.global_costmap import GlobalCostmap
+from planning.global_route import (
+    AStarRoutePlanner,
+    GlobalRoute,
+    remaining_route_length,
+    select_lookahead_waypoint,
+)
 from planning.local_costmap import build_local_costmap_from_depth
-from planning.trajectory_rollout import TrajectoryRolloutPlanner
+from planning.trajectory_rollout import CandidateEvaluation, TrajectoryRolloutPlanner
+from runtime.core.cognition import CognitiveObservation, CognitiveShadowRunner, OccupancyGridSpec, SemanticMemoryObject
+from runtime.core.odysseus import OdysseusNavigator, OdysseusShadowRunner, load_odysseus_checkpoint
 from runtime.core.contracts import PlannerCommand, RuntimeStamp
 from runtime.core.navigation_intelligence import (
     DepthSceneSignature,
@@ -76,6 +86,10 @@ EMERGENCY_MODES = {
     "nav_intel_reverse",
     "nav_intel_recovery_turn",
     "nav_intel_relocalize",
+    "odysseus_safety_turn",
+    "odysseus_explore",
+    "odysseus_retrace",
+    "odysseus_recover",
 }
 
 
@@ -150,6 +164,47 @@ class FactoryBotStackNavigator(Node):
             max_linear_mps=MAX_FORWARD_SPEED,
             max_angular_radps=NORMAL_MAX_ANGULAR_SPEED,
         )
+        self.global_costmap = GlobalCostmap(
+            x_min_m=-4.0,
+            x_max_m=max(22.0, TARGET_X + 5.0),
+            y_min_m=-5.0,
+            y_max_m=max(18.0, TARGET_Y + 5.0),
+            resolution_m=0.18,
+        )
+        self.global_route_planner = AStarRoutePlanner(inflation_radius_m=0.56)
+        self.global_route = GlobalRoute(status="waiting", reason="waiting for pose and depth")
+        self.global_waypoint: tuple[float, float] | None = None
+        self.last_global_plan_time = 0.0
+        cognitive_dataset_dir = os.environ.get("COGNITIVE_DATASET_DIR", "").strip()
+        self.cognitive_shadow = CognitiveShadowRunner(dataset_directory=cognitive_dataset_dir or None)
+        self.last_cognitive_decision = "waiting"
+        self.last_cognitive_confidence = 0.0
+        self.last_cognitive_memory_count = 0
+        self.last_cognitive_sample = ""
+        odysseus_dataset_dir = os.environ.get("ODYSSEUS_DATASET_DIR", "").strip()
+        odysseus_model = None
+        odysseus_checkpoint = os.environ.get("ODYSSEUS_ATTRIBUTOR_CHECKPOINT", "").strip()
+        if odysseus_checkpoint:
+            try:
+                odysseus_model, _checkpoint = load_odysseus_checkpoint(odysseus_checkpoint)
+                self.get_logger().info(f"loaded Odysseus causal attributor checkpoint: {odysseus_checkpoint}")
+            except Exception as exc:
+                self.get_logger().warn(f"could not load Odysseus checkpoint {odysseus_checkpoint}: {exc}")
+        odysseus_memory_path = os.environ.get(
+            "ODYSSEUS_MEMORY_PATH", "artifacts/odysseus_world_memory.json"
+        ).strip()
+        self.odysseus_navigator = OdysseusNavigator(
+            shadow_runner=OdysseusShadowRunner(model=odysseus_model, dataset_directory=odysseus_dataset_dir or None),
+            memory_path=odysseus_memory_path or None,
+        )
+        remembered_no_go = self.odysseus_navigator.remembered_no_go_points()
+        if remembered_no_go.size:
+            self.global_costmap.add_obstacles_world(remembered_no_go, evidence=2.4)
+        self.last_odysseus_mode = "waiting"
+        self.last_odysseus_reason = "waiting for rollout candidates"
+        self.last_odysseus_trace = ""
+        self.last_odysseus_candidate = ""
+        self.last_odysseus_sample = ""
         self.last_motion_check_time = 0.0
         self.last_motion_check_x = 0.0
         self.last_motion_check_y = 0.0
@@ -208,6 +263,20 @@ class FactoryBotStackNavigator(Node):
             "plan_heading",
             "rollout_mode",
             "rollout_reason",
+            "global_route_status",
+            "global_route_reason",
+            "global_route_length",
+            "global_waypoint_x",
+            "global_waypoint_y",
+            "cognitive_decision",
+            "cognitive_confidence",
+            "cognitive_memory_count",
+            "cognitive_sample",
+            "odysseus_mode",
+            "odysseus_reason",
+            "odysseus_trace",
+            "odysseus_candidate",
+            "odysseus_sample",
             "nav_motion_state",
             "nav_safety_action",
             "nav_confidence",
@@ -291,6 +360,46 @@ class FactoryBotStackNavigator(Node):
         distance = math.hypot(dx, dy)
         target_yaw = math.atan2(dy, dx)
         heading_error = wrap_angle(target_yaw - self.pose.yaw)
+        local_costmap = None
+        try:
+            local_costmap = build_local_costmap_from_depth(
+                self.depth,
+                x_max_m=5.0,
+                y_max_m=2.4,
+                resolution_m=0.08,
+                inflation_radius_m=0.48,
+            )
+            self.global_costmap.update_from_local_points(
+                local_costmap.raw_points_xy,
+                pose_x_m=self.pose.x,
+                pose_y_m=self.pose.y,
+                pose_yaw_rad=self.pose.yaw,
+                now_sec=now,
+            )
+            remembered_no_go = self.odysseus_navigator.remembered_no_go_points()
+            if remembered_no_go.size:
+                self.global_costmap.add_obstacles_world(remembered_no_go, evidence=0.35)
+            if self.last_global_plan_time <= 0.0 or now - self.last_global_plan_time >= 0.6:
+                self.global_route = self.global_route_planner.plan(
+                    self.global_costmap,
+                    start_xy=(self.pose.x, self.pose.y),
+                    goal_xy=(TARGET_X, TARGET_Y),
+                )
+                self.last_global_plan_time = now
+            self.global_waypoint = select_lookahead_waypoint(
+                self.global_route, (self.pose.x, self.pose.y), lookahead_m=1.2
+            )
+            if self.global_waypoint is not None:
+                waypoint_yaw = math.atan2(
+                    self.global_waypoint[1] - self.pose.y,
+                    self.global_waypoint[0] - self.pose.x,
+                )
+                heading_error = wrap_angle(waypoint_yaw - self.pose.yaw)
+        except Exception as exc:
+            self.global_route = GlobalRoute(status="mapping_error", reason=str(exc)[:120])
+            self.global_waypoint = None
+
+        self.run_cognitive_shadow(now, local_costmap)
 
         front = sectors["front"]
         left = sectors["left"]
@@ -317,11 +426,18 @@ class FactoryBotStackNavigator(Node):
         near = min(front_close, left_clear, right_clear)
         stuck = self.update_stuck_state(now, distance)
 
-        if self.best_distance == float("inf"):
-            self.best_distance = distance
+        route_active = self.global_route.status == "route_ready"
+        progress_distance = remaining_route_length(
+            self.global_route, (self.pose.x, self.pose.y)
+        ) if route_active else distance
+        if not math.isfinite(progress_distance):
+            progress_distance = distance
+        route_became_longer = route_active and progress_distance > self.best_distance + 0.50
+        if self.best_distance == float("inf") or route_became_longer:
+            self.best_distance = progress_distance
             self.last_best_time = now
-        elif distance < self.best_distance - 0.10:
-            self.best_distance = distance
+        elif progress_distance < self.best_distance - 0.10:
+            self.best_distance = progress_distance
             self.last_best_time = now
 
         if now < self.recovery_until:
@@ -337,8 +453,12 @@ class FactoryBotStackNavigator(Node):
             return
 
         boxed_in = front_close < ESCAPE_OBSTACLE_DIST
-        stalled = distance > 0.9 and self.last_commanded_linear > 0.12 and now - self.last_best_time > 3.0
-        off_course = distance > self.best_distance + 0.75 and now - self.last_best_time > 4.5
+        stalled = progress_distance > 0.9 and self.last_commanded_linear > 0.12 and now - self.last_best_time > 3.0
+        off_course = (
+            not route_active
+            and progress_distance > self.best_distance + 0.75
+            and now - self.last_best_time > 4.5
+        )
         if boxed_in or stuck or stalled or off_course:
             turn_sign = self.choose_detour_sign(now, left_clear, right_clear, plan.heading_error, heading_error, lock_sec=3.0)
             self.start_recovery(now, turn_sign)
@@ -368,13 +488,8 @@ class FactoryBotStackNavigator(Node):
 
         if abs(heading_error) <= GOAL_REACQUIRE_HEADING_ERR_RAD:
             try:
-                local_costmap = build_local_costmap_from_depth(
-                    self.depth,
-                    x_max_m=5.0,
-                    y_max_m=2.4,
-                    resolution_m=0.08,
-                    inflation_radius_m=0.48,
-                )
+                if local_costmap is None:
+                    raise RuntimeError("local costmap unavailable")
                 rollout = self.rollout_planner.plan(
                     local_costmap,
                     goal_heading_error=heading_error,
@@ -382,11 +497,30 @@ class FactoryBotStackNavigator(Node):
                     detour_hint=self.detour_sign,
                 )
                 command = rollout.command
+                observation = self.build_cognitive_observation(now, local_costmap)
+                if observation is not None:
+                    odysseus = self.odysseus_navigator.decide(
+                        observation,
+                        rollout.candidates,
+                        deterministic_command=command,
+                        goal_distance_m=distance,
+                        semantic_forward_m=semantic_forward,
+                        semantic_lateral_m=semantic_lateral,
+                        progress_distance_m=progress_distance,
+                        nav_safety_action=self.last_nav_safety_action,
+                        nav_motion_state=self.last_nav_motion_state,
+                    )
+                    command = odysseus.command
+                    self.last_odysseus_mode = odysseus.mode
+                    self.last_odysseus_reason = odysseus.reason[:120]
+                    self.last_odysseus_trace = odysseus.trace_id
+                    self.last_odysseus_candidate = odysseus.selected_candidate_id or ""
+                    self.last_odysseus_sample = odysseus.closed_sample_path
                 self.last_rollout_mode = command.mode
                 self.last_rollout_reason = command.reason[:120]
                 if abs(command.angular_z) > 0.10:
                     self.lock_detour_sign(now, 1.0 if command.angular_z > 0.0 else -1.0, 0.9)
-                if command.mode == "rollout_safety_turn":
+                if command.mode in {"rollout_safety_turn", "odysseus_recover", "odysseus_retrace", "odysseus_explore"}:
                     self.integral_heading = 0.0
                     self.prev_heading_error = command.angular_z
                 self.publish_and_log(now, command.mode, sectors, distance, heading_error, command.linear_x, command.angular_z)
@@ -568,6 +702,62 @@ class FactoryBotStackNavigator(Node):
         self.stuck_since = 0.0
         return False
 
+    def build_cognitive_observation(self, now: float, local_costmap) -> CognitiveObservation | None:
+        if self.pose is None or local_costmap is None:
+            return None
+        semantic_memory = []
+        for item in self.semantic_objects:
+            if not isinstance(item, dict):
+                continue
+            centroid = item.get("centroid")
+            extent = item.get("extent")
+            if not isinstance(centroid, list) or len(centroid) < 3 or not isinstance(extent, list) or len(extent) < 3:
+                continue
+            semantic_memory.append(SemanticMemoryObject(
+                object_id=int(item.get("object_id", -1)),
+                label=str(item.get("label", "unknown")),
+                confidence=float(np.clip(item.get("confidence", 0.0), 0.0, 1.0)),
+                centroid_world_xyz=np.asarray(centroid[:3], dtype=np.float32),
+                extent_xyz=np.asarray(extent[:3], dtype=np.float32),
+                observations=max(1, int(item.get("observations", 1))),
+            ))
+        route = np.asarray(self.global_route.waypoints, dtype=np.float32).reshape(-1, 2)
+        previous = PlannerCommand(
+            RuntimeStamp(now, "base_link", "navigator_history"),
+            self.last_commanded_linear, self.last_commanded_angular, "previous", "previous command",
+        )
+        return CognitiveObservation(
+            stamp=RuntimeStamp(now, "map", "factory_bot_stack_navigator"),
+            pose=pose2d_to_state(self.pose),
+            goal_world_xy=np.asarray([TARGET_X, TARGET_Y], dtype=np.float32),
+            local_occupancy=local_costmap.grid.astype(np.float32),
+            global_occupancy=self.global_costmap.inflated_occupancy(0.56).astype(np.float32),
+            local_grid_spec=OccupancyGridSpec(local_costmap.resolution_m, 0.0, -local_costmap.y_max_m, "base_link"),
+            global_grid_spec=OccupancyGridSpec(
+                self.global_costmap.resolution_m, self.global_costmap.x_min_m, self.global_costmap.y_min_m, "map"
+            ),
+            route_world_xy=route,
+            semantic_objects=tuple(semantic_memory),
+            rgb=self.rgb,
+            depth_m=self.depth,
+            previous_command=previous,
+            sensor_ages_sec={"depth": max(0.0, now - self.last_depth_stamp), "pose": max(0.0, now - self.last_pose_stamp)},
+        )
+
+    def run_cognitive_shadow(self, now: float, local_costmap) -> None:
+        try:
+            observation = self.build_cognitive_observation(now, local_costmap)
+            if observation is None:
+                return
+            result = self.cognitive_shadow.observe(observation)
+            self.last_cognitive_decision = result.decision.reason[:120]
+            self.last_cognitive_confidence = result.decision.confidence
+            self.last_cognitive_memory_count = result.belief.observation_count
+            self.last_cognitive_sample = str(result.sample_path) if result.sample_path else ""
+        except Exception as exc:
+            self.last_cognitive_decision = f"shadow_error:{str(exc)[:100]}"
+            self.last_cognitive_confidence = 0.0
+
     def semantic_object_hazard(self) -> tuple[float, float]:
         if self.pose is None or not self.semantic_objects:
             return 8.0, 0.0
@@ -635,6 +825,10 @@ class FactoryBotStackNavigator(Node):
                 f"goal_dist={distance:.2f}m heading_err={heading_error:.2f}rad "
                 f"plan={self.last_plan.mode}:{self.last_plan.clearance:.2f}m/{self.last_plan.heading_error:.2f}rad "
                 f"rollout={self.last_rollout_mode}:{self.last_rollout_reason} "
+                f"global_route={self.global_route.status}:{self.global_route.reason} "
+                f"global_waypoint={self.global_waypoint if self.global_waypoint is not None else 'none'} "
+                f"cognitive_shadow={self.last_cognitive_confidence:.2f}:{self.last_cognitive_decision} "
+                f"odysseus={self.last_odysseus_mode}:{self.last_odysseus_reason} "
                 f"nav_intel={self.last_nav_motion_state}/{self.last_nav_safety_action}:{self.last_nav_reason} "
                 f"learned_risk={self.last_learned_risk_score:.2f}/{self.last_learned_risk_action}:{self.last_learned_risk_reason} "
                 f"semantic_hazard={semantic_forward:.2f}m/{semantic_lateral:.2f}m "
@@ -683,6 +877,20 @@ class FactoryBotStackNavigator(Node):
                 "plan_heading": f"{self.last_plan.heading_error:.4f}",
                 "rollout_mode": self.last_rollout_mode,
                 "rollout_reason": self.last_rollout_reason,
+                "global_route_status": self.global_route.status,
+                "global_route_reason": self.global_route.reason,
+                "global_route_length": f"{self.global_route.length_m:.4f}",
+                "global_waypoint_x": f"{self.global_waypoint[0]:.4f}" if self.global_waypoint is not None else "",
+                "global_waypoint_y": f"{self.global_waypoint[1]:.4f}" if self.global_waypoint is not None else "",
+                "cognitive_decision": self.last_cognitive_decision,
+                "cognitive_confidence": f"{self.last_cognitive_confidence:.4f}",
+                "cognitive_memory_count": self.last_cognitive_memory_count,
+                "cognitive_sample": self.last_cognitive_sample,
+                "odysseus_mode": self.last_odysseus_mode,
+                "odysseus_reason": self.last_odysseus_reason,
+                "odysseus_trace": self.last_odysseus_trace,
+                "odysseus_candidate": self.last_odysseus_candidate,
+                "odysseus_sample": self.last_odysseus_sample,
                 "nav_motion_state": self.last_nav_motion_state,
                 "nav_safety_action": self.last_nav_safety_action,
                 "nav_confidence": f"{self.last_nav_confidence:.4f}",
@@ -1029,6 +1237,10 @@ def main() -> None:
         try:
             if rclpy.ok():
                 node.publish_cmd(0.0, 0.0)
+        except Exception:
+            pass
+        try:
+            node.odysseus_navigator.save_memory()
         except Exception:
             pass
         node.close()

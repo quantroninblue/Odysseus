@@ -6,6 +6,12 @@ from pathlib import Path
 
 import numpy as np
 
+from runtime.core.cognition import (
+    CognitiveMemory, CognitiveObservation, CognitiveShadowRunner, CognitiveOutcome, CognitiveTrainingSample,
+    DeterministicCognitiveTeacher, EpisodicMemoryEntry, OccupancyGridSpec,
+    load_training_sample, observation_context_vector, save_training_sample,
+)
+
 from geometry.transforms.camera_models import CameraIntrinsics
 from runtime.core.config import RuntimeConfig, load_runtime_config, validate_runtime_config
 from runtime.core.contracts import LocalObstacleMap, ObstacleObservation, PlannerCommand, RuntimeStamp
@@ -399,6 +405,37 @@ class RuntimeCoreTests(unittest.TestCase):
                 T_depth_rgb=np.eye(4, dtype=np.float32),
             ),
         )
+
+
+    def test_cognitive_memory_teacher_and_owned_dataset(self):
+        observation = CognitiveObservation(
+            RuntimeStamp(1.0, "map", "test"),
+            __import__("runtime.core.navigation_intelligence", fromlist=["Pose2DState"]).Pose2DState(1.0, 0.0, 0.0, 0.0, "test"),
+            np.asarray([3.0, 0.0]),
+            np.zeros((40, 40), dtype=np.float32),
+            np.zeros((30, 30), dtype=np.float32),
+            OccupancyGridSpec(0.1, 0.0, -2.0, "base_link"),
+            OccupancyGridSpec(0.2, -2.0, -2.0, "map"),
+            np.asarray([[0.0, 0.0], [3.0, 0.0]]),
+            localization_uncertainty=0.1,
+        )
+        memory = CognitiveMemory()
+        memory.observe(observation)
+        outcome = CognitiveOutcome("route", 1.0, 2.0, 0.5, False, False, 2.5)
+        memory.remember(EpisodicMemoryEntry("episode-a", observation_context_vector(observation), outcome, "ok"))
+        self.assertEqual(memory.observe(observation).recalled_episode_ids, ("episode-a",))
+        self.assertFalse(DeterministicCognitiveTeacher().decide(observation).fallback_requested)
+        sample = CognitiveTrainingSample(
+            np.zeros((2, 4, 8, 8)), np.zeros((2, 2, 8, 8)), np.zeros((2, 16)),
+            np.zeros((5, 2)), np.asarray([1.0, 0.0, 0.2, 0.1]), {"source": "owned_gazebo"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            loaded = load_training_sample(save_training_sample(sample, Path(directory) / "sample.npz"))
+            shadow = CognitiveShadowRunner(context_length=1, dataset_directory=directory, record_stride=1)
+            shadow_result = shadow.observe(observation)
+            self.assertIsNotNone(shadow_result.sample_path)
+            self.assertTrue(shadow_result.sample_path.exists())
+        self.assertEqual(loaded.metadata["source"], "owned_gazebo")
 
 
 if __name__ == "__main__":

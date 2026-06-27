@@ -30,6 +30,17 @@ class LocalPlannerTests(unittest.TestCase):
         self.assertLess(abs(result.command.angular_z), 0.20)
         self.assertEqual(result.command.mode, "rollout_drive")
 
+
+    def test_rollout_includes_reverse_escape_candidates(self):
+        depth = np.full((120, 160), 8.0, dtype=np.float32)
+        depth[45:80, 70:90] = 0.55
+        costmap = build_local_costmap_from_depth(depth, resolution_m=0.08, inflation_radius_m=0.45)
+        planner = TrajectoryRolloutPlanner()
+
+        result = planner.plan(costmap, goal_heading_error=0.0, now_sec=1.0)
+
+        self.assertTrue(any(candidate.accepted and candidate.linear_x < -0.02 for candidate in result.candidates))
+
     def test_rollout_rejects_straight_path_into_center_obstacle(self):
         depth = np.full((120, 160), 8.0, dtype=np.float32)
         depth[35:70, 77:83] = 1.0
